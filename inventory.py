@@ -46,7 +46,7 @@ def get_google_sheet_client():
         else: return None
     except: return None
 
-# --- 데이터 로드 (강력한 형변환) ---
+# --- 데이터 로드 ---
 def load_data():
     client = get_google_sheet_client()
     if client:
@@ -66,9 +66,8 @@ def load_data():
                 for c in cols:
                     if c not in df.columns: df[c] = ""
                 
-                # [핵심] 모든 데이터를 문자열로 변환하고 소수점(.0) 제거
-                for col in df.columns:
-                    df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                # 데이터 문자열 변환 및 공백 제거
+                df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
                 return df
 
             df_m = get_ws_df('품목표', ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
@@ -76,7 +75,6 @@ def load_data():
             df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
             df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
             
-            # 수량 컬럼만 숫자로 되돌리기
             if not df_map.empty:
                 df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
                 df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
@@ -95,7 +93,6 @@ def save_log_data(new_df):
             sh = client.open(SHEET_NAME)
             ws = sh.worksheet('입출고')
             save_cols = ['날짜', '구분', 'Box번호', '위치', '파렛트']
-            # 저장 전 문자열 변환
             valid_df = new_df[save_cols].astype(str)
             ws.append_rows(valid_df.values.tolist())
             return True
@@ -110,7 +107,6 @@ def save_data(sheet_name, new_df):
             try:
                 ws = sh.worksheet(sheet_name)
                 ws.clear()
-                # 저장 전 문자열 변환 및 소수점 제거
                 up_df = new_df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
                 ws.update([up_df.columns.values.tolist()] + up_df.values.tolist())
             except:
@@ -129,6 +125,26 @@ def init_data():
         st.session_state.df_log = l
         st.session_state.df_details = d
         st.session_state.is_cloud = is_cloud
+
+# --- 엑셀 다운로드용 함수 ---
+def to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sheet1')
+    return output.getvalue()
+
+# --- 샘플 파일 생성 함수 ---
+def get_sample_file():
+    # 샘플 데이터 생성
+    sample_data = {
+        '날짜': [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '2025-12-09 10:00:00'],
+        '구분': ['입고', '출고'],
+        'Box번호': ['V2024...', 'V2025...'],
+        '위치': ['1-2-7', ''],
+        '파렛트': ['P-01', '']
+    }
+    df = pd.DataFrame(sample_data)
+    return to_excel(df)
 
 # --- 랙 맵 ---
 def render_rack_map_interactive(stock_df, highlight_locs=None):
@@ -211,21 +227,17 @@ def buffer_scan():
     df_master = st.session_state.df_master
     df_log = st.session_state.df_log
 
-    # 품목 정보 찾기
     map_info = df_mapping[df_mapping['Box번호'] == scan_val]
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "", 0, ""
     
     if not map_info.empty:
         p_code = str(map_info.iloc[0]['품목코드']).strip()
         disp_qty = map_info.iloc[0]['수량']
-        
-        # 마스터 매칭
         m_info = df_master[df_master['품목코드'] == p_code]
         if not m_info.empty:
             disp_name = m_info.iloc[0]['품명']
             disp_spec = m_info.iloc[0]['규격']
 
-    # 상태 확인
     box_logs = df_log[df_log['Box번호'] == scan_val].sort_values(by='날짜', ascending=False)
     box_status, current_db_loc = "신규", "미지정"
     if not box_logs.empty:
@@ -248,16 +260,10 @@ def buffer_scan():
         else:
             final_loc = curr_loc if curr_loc else "미지정"
             final_pal = curr_pal if curr_pal else "이름없음"
-            
             log_entry = {
-                '날짜': now_str,
-                '구분': mode,
-                'Box번호': scan_val,
-                '품목코드': p_code, # 추가됨
-                '규격': disp_spec,
-                '수량': disp_qty,
-                '위치': final_loc,
-                '파렛트': final_pal
+                '날짜': now_str, '구분': mode, 'Box번호': scan_val,
+                '품목코드': p_code, '규격': disp_spec, '수량': disp_qty,
+                '위치': final_loc, '파렛트': final_pal
             }
             st.session_state.scan_buffer.append(log_entry)
             st.session_state.proc_msg = ("success", f"✅ {mode}: {scan_val} ({disp_name})")
@@ -267,7 +273,6 @@ def buffer_scan():
 def save_buffer_to_cloud():
     if not st.session_state.scan_buffer: return
     new_logs = pd.DataFrame(st.session_state.scan_buffer)
-    # 저장할 때는 품목코드/규격/수량은 제외하고 로그만 저장 (DB 정규화)
     if st.session_state.is_cloud:
         with st.spinner('저장 중...'):
             if save_log_data(new_logs):
@@ -284,7 +289,7 @@ def refresh_all():
 
 # --- 메인 ---
 def main():
-    st.title("🏭 디지타스 창고 재고관리 (Ver.5.7)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.5.8)")
     
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
@@ -317,23 +322,18 @@ def main():
         with c3: st.text_input("파렛트 이름", key="curr_palette")
         with c4: st.text_input("Box 번호 스캔", key="scan_input", on_change=buffer_scan)
 
-        # [수정] 화면 표시 순서 지정
         if st.session_state.scan_buffer:
             disp_df = pd.DataFrame(st.session_state.scan_buffer)
-            # 요청하신 컬럼 순서
             cols_order = ['날짜', '구분', 'Box번호', '품목코드', '규격', '수량', '위치', '파렛트']
-            # 없는 컬럼은 무시하고 있는 것만 표시
             final_cols = [c for c in cols_order if c in disp_df.columns]
             st.dataframe(disp_df[final_cols].iloc[::-1], use_container_width=True)
-        else:
-            st.info("대기 중...")
+        else: st.info("대기 중...")
         
         if st.button("💾 구글 시트에 저장", type="primary", use_container_width=True): save_buffer_to_cloud()
         if st.button("🗑️ 목록 비우기", use_container_width=True): st.session_state.scan_buffer = []
 
     with tab2:
-        if df_log.empty:
-            st.info("데이터 없음")
+        if df_log.empty: st.info("데이터 없음")
         else:
             last_stat = df_log.sort_values('날짜').groupby('Box번호').tail(1)
             stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])]
@@ -369,8 +369,23 @@ def main():
             st.dataframe(filtered_df)
 
     with tab3:
-        up = st.file_uploader("입출고 파일", type=['xlsx', 'csv'])
-        if up and st.button("업로드"):
+        st.subheader("📤 입출고 내역 일괄 업로드")
+        st.markdown("""
+        **[사용법]**
+        1. 아래 **'샘플 양식 다운로드'** 버튼을 눌러 엑셀 파일을 받으세요.
+        2. 양식에 맞춰 데이터를 입력하세요. (필수 컬럼: **구분, Box번호**)
+        3. 작성한 파일을 아래에 업로드하고 **'구글 시트 업로드'** 버튼을 누르세요.
+        """)
+        
+        st.download_button(
+            label="📥 샘플 양식 다운로드",
+            data=get_sample_file(),
+            file_name="입출고_샘플양식.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        up = st.file_uploader("엑셀 파일 업로드", type=['xlsx', 'csv'])
+        if up and st.button("구글 시트 업로드"):
             df = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
             if '날짜' not in df.columns: df['날짜'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for c in ['위치', '파렛트']: 
@@ -385,9 +400,7 @@ def main():
         if up_pack and st.button("등록"):
             try:
                 raw = pd.read_excel(up_pack, dtype=str)
-                # 데이터 정제 (공백 제거)
                 raw = raw.astype(str).apply(lambda x: x.str.strip())
-                
                 grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
                 grp.columns = ['Box번호', '품목코드', '수량']
                 
