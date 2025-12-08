@@ -66,7 +66,6 @@ def load_data():
                 for c in cols:
                     if c not in df.columns: df[c] = ""
                 
-                # 데이터 문자열 변환 및 소수점 제거 (.0)
                 df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
                 return df
 
@@ -75,7 +74,6 @@ def load_data():
             df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
             df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
             
-            # 수량은 숫자로 변환
             if not df_map.empty:
                 df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
                 df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
@@ -143,7 +141,7 @@ def get_sample_file():
     }
     return to_excel(pd.DataFrame(sample_data))
 
-# --- 랙 맵 ---
+# --- 랙 맵 (이름 통일됨) ---
 def render_rack_map_interactive(stock_df, highlight_locs=None):
     if highlight_locs is None: highlight_locs = []
     rack_summary = {}
@@ -182,6 +180,7 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
     c_left, c_mid, c_right = st.columns([3.5, 0.1, 0.8])
     
     with c_left:
+        # Group 1 (Rack 6)
         cols = st.columns(7)
         for c_idx in range(7):
             rack_key = f"6-{c_idx+1}"
@@ -191,46 +190,26 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
         st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
         
-        cols = st.columns(7)
-        for c_idx in range(7):
-            rack_key = f"5-{c_idx+1}"
-            qty = rack_summary.get(rack_key, 0)
-            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
-        
-        cols = st.columns(7)
-        for c_idx in range(7):
-            rack_key = f"4-{c_idx+1}"
-            qty = rack_summary.get(rack_key, 0)
-            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+        # Group 2 (Rack 5, 4)
+        for r_num in [5, 4]:
+            cols = st.columns(7)
+            for c_idx in range(7):
+                rack_key = f"{r_num}-{c_idx+1}"
+                qty = rack_summary.get(rack_key, 0)
+                label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+                is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+                cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
         st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
         
-        cols = st.columns(7)
-        for c_idx in range(7):
-            rack_key = f"3-{c_idx+1}"
-            qty = rack_summary.get(rack_key, 0)
-            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
-        
-        cols = st.columns(7)
-        for c_idx in range(7):
-            rack_key = f"2-{c_idx+1}"
-            qty = rack_summary.get(rack_key, 0)
-            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
-            
-        cols = st.columns(7)
-        for c_idx in range(7):
-            rack_key = f"1-{c_idx+1}"
-            qty = rack_summary.get(rack_key, 0)
-            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+        # Group 3 (Rack 3, 2, 1)
+        for r_num in [3, 2, 1]:
+            cols = st.columns(7)
+            for c_idx in range(7):
+                rack_key = f"{r_num}-{c_idx+1}"
+                qty = rack_summary.get(rack_key, 0)
+                label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+                is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+                cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
 
     with c_mid:
         st.markdown('<div class="rack-divider"></div>', unsafe_allow_html=True)
@@ -281,8 +260,6 @@ def buffer_scan():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     if mode == "조회(검색)":
-        # [수정] 조회 시 보여줄 메시지 형식 변경: Box번호 / 규격 / 수량 / 위치
-        # 위치는 현재 DB상의 위치(current_db_loc)를 보여줌
         msg_text = f"🔎 조회: {scan_val} / {disp_spec} / {disp_qty}개 / {current_db_loc}"
         st.session_state.proc_msg = ("info", msg_text)
     else:
@@ -320,7 +297,7 @@ def refresh_all():
 
 # --- 메인 ---
 def main():
-    st.title("🏭 디지타스 창고 재고관리 (Ver.6.0)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.6.1)")
     
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
@@ -403,6 +380,7 @@ def main():
                     return (len(p)>=3 and f"{p[0]}-{p[2]}"==sel) or (len(p)==2 and f"{p[0]}-{p[1]}"==sel)
                 filtered_df = filtered_df[filtered_df['위치'].apply(check_loc)]
 
+            # [수정] 올바른 함수 이름 호출
             c_map, c_list = st.columns([1.5, 1])
             with c_map:
                 st.markdown("##### 🗺️ 창고 배치도")
