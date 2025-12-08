@@ -18,7 +18,7 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="로그인", layout="centered")
+    st.set_page_config(page_title="재고관리", layout="wide") # 화면 넓게 쓰기
     st.title("🔒 관계자 외 출입금지")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
@@ -66,7 +66,6 @@ def load_data():
                 for c in cols:
                     if c not in df.columns: df[c] = ""
                 
-                # 데이터 문자열 변환 및 공백 제거
                 df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
                 return df
 
@@ -126,25 +125,22 @@ def init_data():
         st.session_state.df_details = d
         st.session_state.is_cloud = is_cloud
 
-# --- 엑셀 다운로드용 함수 ---
+# --- 엑셀 다운로드 ---
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
     return output.getvalue()
 
-# --- 샘플 파일 생성 함수 ---
 def get_sample_file():
-    # 샘플 데이터 생성
     sample_data = {
-        '날짜': [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '2025-12-09 10:00:00'],
-        '구분': ['입고', '출고'],
-        'Box번호': ['V2024...', 'V2025...'],
-        '위치': ['1-2-7', ''],
-        '파렛트': ['P-01', '']
+        '날짜': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+        '구분': ['입고'],
+        'Box번호': ['V2024...'],
+        '위치': ['1-2-7'],
+        '파렛트': ['P-01']
     }
-    df = pd.DataFrame(sample_data)
-    return to_excel(df)
+    return to_excel(pd.DataFrame(sample_data))
 
 # --- 랙 맵 ---
 def render_rack_map_interactive(stock_df, highlight_locs=None):
@@ -161,13 +157,19 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
 
     st.markdown("""
     <style>
-    div[data-testid="column"] { padding: 0 2px !important; min-width: 0 !important; }
-    div.stButton > button { width: 100%; height: 40px !important; margin: 2px 0px !important; padding: 0px !important; font-size: 10px !important; font-weight: 700 !important; border-radius: 4px !important; border: 1px solid #ccc; box-shadow: 1px 1px 2px rgba(0,0,0,0.05); }
-    div.stButton > button:hover { border-color: #333 !important; transform: scale(1.05); z-index: 5; }
+    /* 맵 컨테이너 테두리 */
+    .map-container {
+        border: 2px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 15px;
+        background-color: #f9f9f9;
+    }
+    div[data-testid="column"] button { width: 100%; height: 40px !important; margin: 1px 0px !important; padding: 0px !important; font-size: 10px !important; font-weight: 700 !important; border-radius: 4px !important; border: 1px solid #ccc; }
+    div[data-testid="column"] button:hover { border-color: #333 !important; transform: scale(1.05); z-index: 5; }
     button[kind="primary"] { background-color: #ffcdd2 !important; color: #b71c1c !important; border: 2px solid #d32f2f !important; }
     button[kind="secondary"] { background-color: #ffffff !important; color: #555 !important; }
     .rack-divider { border-left: 2px dashed #ddd; height: 100%; margin: 0 auto; }
-    .rack-spacer { height: 25px; width: 100%; }
+    .rack-spacer { height: 30px; width: 100%; }
     .rack7-label { text-align: center; font-weight: bold; color: #555; margin-bottom: 5px; font-size: 12px; }
     </style>
     """, unsafe_allow_html=True)
@@ -176,35 +178,44 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
         st.session_state.selected_rack = key
         st.session_state.filter_mode = 'rack'
 
+    st.markdown('<div class="map-container">', unsafe_allow_html=True)
     c_left, c_mid, c_right = st.columns([3.5, 0.1, 0.8])
+    
     with c_left:
-        for r_num in [6]:
-            cols = st.columns(7)
-            for c_idx, col in enumerate(cols):
-                rack_key = f"{r_num}-{c_idx+1}"
-                qty = rack_summary.get(rack_key, 0)
-                label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-                col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+        # Group 1 (Rack 6)
+        cols = st.columns(7)
+        for c_idx in range(7):
+            rack_key = f"6-{c_idx+1}"
+            qty = rack_summary.get(rack_key, 0)
+            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
         st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
+        
+        # Group 2 (Rack 5, 4)
         for r_num in [5, 4]:
             cols = st.columns(7)
-            for c_idx, col in enumerate(cols):
+            for c_idx in range(7):
                 rack_key = f"{r_num}-{c_idx+1}"
                 qty = rack_summary.get(rack_key, 0)
                 label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
                 is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-                col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+                cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
         st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
+        
+        # Group 3 (Rack 3, 2, 1)
         for r_num in [3, 2, 1]:
             cols = st.columns(7)
-            for c_idx, col in enumerate(cols):
+            for c_idx in range(7):
                 rack_key = f"{r_num}-{c_idx+1}"
                 qty = rack_summary.get(rack_key, 0)
                 label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
                 is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-                col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
-    with c_mid: st.markdown('<div class="rack-divider"></div>', unsafe_allow_html=True)
+                cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+
+    with c_mid:
+        st.markdown('<div class="rack-divider"></div>', unsafe_allow_html=True)
+
     with c_right:
         st.markdown('<div class="rack7-label">Rack 7</div>', unsafe_allow_html=True)
         for i in range(12, 0, -1):
@@ -213,6 +224,7 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
             is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
             st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- 스캔 로직 ---
 def buffer_scan():
@@ -246,10 +258,7 @@ def buffer_scan():
         if last_action in ['입고', '이동']: box_status = f"창고있음({current_db_loc})"
         elif last_action == '출고': box_status = "출고됨"
 
-    is_duplicate = False
-    if mode == "입고" and "창고있음" in box_status:
-        is_duplicate = True
-
+    is_duplicate = (mode == "입고" and "창고있음" in box_status)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     if mode == "조회(검색)":
@@ -266,7 +275,7 @@ def buffer_scan():
                 '위치': final_loc, '파렛트': final_pal
             }
             st.session_state.scan_buffer.append(log_entry)
-            st.session_state.proc_msg = ("success", f"✅ {mode}: {scan_val} ({disp_name})")
+            st.session_state.proc_msg = ("success", f"✅ {mode}: {scan_val}")
 
     st.session_state.scan_input = ""
 
@@ -289,7 +298,7 @@ def refresh_all():
 
 # --- 메인 ---
 def main():
-    st.title("🏭 디지타스 창고 재고관리 (Ver.5.8)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.5.9)")
     
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
@@ -304,6 +313,7 @@ def main():
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터"])
 
+    # 1. 스캔
     with tab1:
         c_h, c_r = st.columns([4, 1])
         with c_h: st.subheader("🚀 스캔 작업")
@@ -329,11 +339,14 @@ def main():
             st.dataframe(disp_df[final_cols].iloc[::-1], use_container_width=True)
         else: st.info("대기 중...")
         
-        if st.button("💾 구글 시트에 저장", type="primary", use_container_width=True): save_buffer_to_cloud()
+        # 버튼 색상 수정 (Primary -> 일반)
+        if st.button("💾 구글 시트에 저장", use_container_width=True): save_buffer_to_cloud()
         if st.button("🗑️ 목록 비우기", use_container_width=True): st.session_state.scan_buffer = []
 
+    # 2. 재고 현황 (가로 배치 & 다운로드 복구)
     with tab2:
-        if df_log.empty: st.info("데이터 없음")
+        if df_log.empty:
+            st.info("데이터 없음")
         else:
             last_stat = df_log.sort_values('날짜').groupby('Box번호').tail(1)
             stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])]
@@ -342,6 +355,16 @@ def main():
             merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
             merged = pd.merge(merged, df_master, on='품목코드', how='left')
 
+            # 다운로드 버튼 영역 (복구됨)
+            d1, d2, d3 = st.columns(3)
+            with d1: 
+                st.download_button("📥 재고 요약 다운로드", to_excel(merged), "재고요약.xlsx", use_container_width=True)
+            with d2:
+                st.download_button("📥 전체 상세 내역", to_excel(st.session_state.df_details), "상세내역.xlsx", use_container_width=True)
+            
+            st.divider()
+
+            # 검색 필터
             sc1, sc2, sc3 = st.columns([1, 1, 2])
             with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "Box번호"])
             with sc2: exact_match = st.checkbox("정확히 일치")
@@ -365,26 +388,20 @@ def main():
                     return (len(p)>=3 and f"{p[0]}-{p[2]}"==sel) or (len(p)==2 and f"{p[0]}-{p[1]}"==sel)
                 filtered_df = filtered_df[filtered_df['위치'].apply(check_loc)]
 
-            render_rack_map_interactive(stock_boxes, hl_list)
-            st.dataframe(filtered_df)
+            # [수정] 좌우 가로 배치 (1.5 : 1 비율)
+            c_map, c_list = st.columns([1.5, 1])
+            with c_map:
+                st.markdown("##### 🗺️ 창고 배치도")
+                render_rack_map_interactive(stock_boxes, hl_list)
+            with c_list:
+                st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
+                st.dataframe(filtered_df, use_container_width=True, height=600)
 
+    # 3. 일괄 업로드
     with tab3:
         st.subheader("📤 입출고 내역 일괄 업로드")
-        st.markdown("""
-        **[사용법]**
-        1. 아래 **'샘플 양식 다운로드'** 버튼을 눌러 엑셀 파일을 받으세요.
-        2. 양식에 맞춰 데이터를 입력하세요. (필수 컬럼: **구분, Box번호**)
-        3. 작성한 파일을 아래에 업로드하고 **'구글 시트 업로드'** 버튼을 누르세요.
-        """)
-        
-        st.download_button(
-            label="📥 샘플 양식 다운로드",
-            data=get_sample_file(),
-            file_name="입출고_샘플양식.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-        up = st.file_uploader("엑셀 파일 업로드", type=['xlsx', 'csv'])
+        st.download_button("📥 샘플 양식 다운로드", get_sample_file(), "입출고_샘플.xlsx")
+        up = st.file_uploader("엑셀 파일", type=['xlsx', 'csv'])
         if up and st.button("구글 시트 업로드"):
             df = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
             if '날짜' not in df.columns: df['날짜'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -395,6 +412,7 @@ def main():
                     refresh_all()
                     st.success("완료!")
 
+    # 4. 포장 데이터
     with tab4:
         up_pack = st.file_uploader("포장 파일", type=['xlsx'])
         if up_pack and st.button("등록"):
