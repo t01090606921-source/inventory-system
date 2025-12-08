@@ -8,7 +8,7 @@ try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
 except ImportError:
-    st.error("라이브러리 설치 필요. requirements.txt 확인")
+    st.error("라이브러리가 설치되지 않았습니다. requirements.txt를 확인하세요.")
     st.stop()
 
 # --- [1] 로그인 보안 ---
@@ -46,7 +46,7 @@ def get_google_sheet_client():
         else: return None
     except: return None
 
-# --- 데이터 로드 (형변환 강화) ---
+# --- 데이터 로드 (공백 제거 추가) ---
 def load_data():
     client = get_google_sheet_client()
     if client:
@@ -62,17 +62,19 @@ def load_data():
                     ws = sh.add_worksheet(title=name, rows=1000, cols=20)
                     ws.append_row(cols)
                     df = pd.DataFrame(columns=cols)
+                
                 for c in cols:
                     if c not in df.columns: df[c] = ""
-                # [중요] 모든 데이터를 문자로 변환하여 매칭 오류 방지
-                return df.astype(str)
+                
+                # [핵심] 모든 데이터 문자 변환 + 앞뒤 공백 제거
+                df = df.astype(str).apply(lambda x: x.str.strip())
+                return df
 
             df_m = get_ws_df('품목표', ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
             df_map = get_ws_df('매핑정보', ['Box번호', '품목코드', '수량'])
             df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
             df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
             
-            # 수량만 숫자로 복구
             if not df_map.empty:
                 df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
                 df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
@@ -82,7 +84,6 @@ def load_data():
             st.error(f"데이터 로드 오류: {e}")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), False
     else:
-        # 로컬 모드 생략 (클라우드 위주)
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), False
 
 def save_log_data(new_df):
@@ -91,7 +92,6 @@ def save_log_data(new_df):
         try:
             sh = client.open(SHEET_NAME)
             ws = sh.worksheet('입출고')
-            # 저장할 때 필요한 컬럼만
             save_cols = ['날짜', '구분', 'Box번호', '위치', '파렛트']
             valid_df = new_df[save_cols].astype(str)
             ws.append_rows(valid_df.values.tolist())
@@ -107,12 +107,12 @@ def save_data(sheet_name, new_df):
             try:
                 ws = sh.worksheet(sheet_name)
                 ws.clear()
-                # 모든 데이터 문자로 변환 후 저장
-                up_df = new_df.astype(str)
+                # 공백 제거 후 저장
+                up_df = new_df.astype(str).apply(lambda x: x.str.strip())
                 ws.update([up_df.columns.values.tolist()] + up_df.values.tolist())
             except:
                 ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=20)
-                up_df = new_df.astype(str)
+                up_df = new_df.astype(str).apply(lambda x: x.str.strip())
                 ws.update([up_df.columns.values.tolist()] + up_df.values.tolist())
             return True
         except: return False
@@ -195,9 +195,9 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
             st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
 
-# --- 스캔 로직 (수정됨: 상세 정보 표시) ---
+# --- 스캔 로직 ---
 def buffer_scan():
-    scan_val = str(st.session_state.scan_input).strip() # 공백제거 및 문자변환
+    scan_val = str(st.session_state.scan_input).strip()
     mode = st.session_state.work_mode
     curr_loc = str(st.session_state.get('curr_location', '')).strip()
     curr_pal = str(st.session_state.get('curr_palette', '')).strip()
@@ -208,14 +208,16 @@ def buffer_scan():
     df_master = st.session_state.df_master
     df_log = st.session_state.df_log
 
-    # 품목 정보 찾기
+    # 품목 정보 찾기 (공백 제거 후 비교)
+    # 1. 매핑정보에서 품목코드 찾기
     map_info = df_mapping[df_mapping['Box번호'] == scan_val]
     disp_name, disp_spec, disp_qty = "정보없음", "", 0
     
     if not map_info.empty:
-        p_code = map_info.iloc[0]['품목코드']
+        p_code = str(map_info.iloc[0]['품목코드']).strip()
         disp_qty = map_info.iloc[0]['수량']
         
+        # 2. 마스터에서 품명/규격 찾기
         m_info = df_master[df_master['품목코드'] == p_code]
         if not m_info.empty:
             disp_name = m_info.iloc[0]['품명']
@@ -230,12 +232,10 @@ def buffer_scan():
         if last_action in ['입고', '이동']: box_status = f"창고있음({current_db_loc})"
         elif last_action == '출고': box_status = "출고됨"
 
-    # 중복 체크 (입고 시)
     is_duplicate = False
     if mode == "입고" and "창고있음" in box_status:
         is_duplicate = True
 
-    # 버퍼에 추가
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     if mode == "조회(검색)":
@@ -247,14 +247,13 @@ def buffer_scan():
             final_loc = curr_loc if curr_loc else "미지정"
             final_pal = curr_pal if curr_pal else "이름없음"
             
-            # 화면에 보여줄 데이터 구조
             log_entry = {
                 '날짜': now_str,
                 '구분': mode,
                 'Box번호': scan_val,
-                '품명': disp_name, # 화면 표시용
-                '규격': disp_spec, # 화면 표시용
-                '수량': disp_qty,  # 화면 표시용
+                '품명': disp_name,
+                '규격': disp_spec,
+                '수량': disp_qty,
                 '위치': final_loc,
                 '파렛트': final_pal
             }
@@ -266,7 +265,6 @@ def buffer_scan():
 def save_buffer_to_cloud():
     if not st.session_state.scan_buffer: return
     new_logs = pd.DataFrame(st.session_state.scan_buffer)
-    
     if st.session_state.is_cloud:
         with st.spinner('저장 중...'):
             if save_log_data(new_logs):
@@ -283,7 +281,7 @@ def refresh_all():
 
 # --- 메인 ---
 def main():
-    st.title("🏭 디지타스 창고 재고관리 (Ver.5.5)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.5.6)")
     
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
@@ -316,7 +314,6 @@ def main():
         with c3: st.text_input("파렛트 이름", key="curr_palette")
         with c4: st.text_input("Box 번호 스캔", key="scan_input", on_change=buffer_scan)
 
-        # 버퍼 테이블 표시 (역순)
         if st.session_state.scan_buffer:
             st.dataframe(pd.DataFrame(st.session_state.scan_buffer).iloc[::-1], use_container_width=True)
         else:
@@ -379,8 +376,8 @@ def main():
         if up_pack and st.button("등록"):
             try:
                 raw = pd.read_excel(up_pack, dtype=str)
-                # 데이터 정제 (공백 제거)
-                raw = raw.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+                # 데이터 정제 (문자로 변환 및 공백 제거)
+                raw = raw.astype(str).apply(lambda x: x.str.strip())
                 
                 grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
                 grp.columns = ['Box번호', '품목코드', '수량']
