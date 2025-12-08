@@ -46,45 +46,51 @@ def get_google_sheet_client():
         else: return None
     except: return None
 
-# --- [속도 개선 핵심] 데이터 로드 캐싱 ---
-# ttl=3600: 한번 불러오면 1시간 동안은 메모리에서 꺼내 씀 (속도 향상)
-@st.cache_data(ttl=3600, show_spinner=False) 
-def load_data_from_google():
+# --- 데이터 로드 (강화됨) ---
+def load_data():
     client = get_google_sheet_client()
-    if not client: return None, None, None, None, False
+    if client:
+        try:
+            sh = client.open(SHEET_NAME)
+            def get_ws_df(name, cols):
+                try:
+                    ws = sh.worksheet(name)
+                    records = ws.get_all_records()
+                    df = pd.DataFrame(records)
+                    # 데이터가 없어도 빈 프레임 생성
+                    if df.empty: df = pd.DataFrame(columns=cols)
+                except:
+                    ws = sh.add_worksheet(title=name, rows=1000, cols=20)
+                    ws.append_row(cols)
+                    df = pd.DataFrame(columns=cols)
+                
+                # [핵심 수정] 필수 컬럼이 없으면 강제로 생성 (KeyError 방지)
+                for c in cols:
+                    if c not in df.columns: 
+                        df[c] = ""
+                
+                # 정의된 컬럼 순서대로 정렬 (불필요한 컬럼 제거)
+                df = df[cols]
+                
+                # 데이터 문자열 변환 및 소수점 제거
+                df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
+                return df
 
-    try:
-        sh = client.open(SHEET_NAME)
-        def get_ws_df(name, cols):
-            try:
-                ws = sh.worksheet(name)
-                records = ws.get_all_records()
-                df = pd.DataFrame(records)
-                if df.empty: df = pd.DataFrame(columns=cols)
-            except:
-                ws = sh.add_worksheet(title=name, rows=1000, cols=20)
-                ws.append_row(cols)
-                df = pd.DataFrame(columns=cols)
+            df_m = get_ws_df('품목표', ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
+            df_map = get_ws_df('매핑정보', ['Box번호', '품목코드', '수량'])
+            df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
+            df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
             
-            for c in cols:
-                if c not in df.columns: df[c] = ""
+            if not df_map.empty:
+                df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
+                df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
             
-            # 데이터 문자열 변환 및 소수점 제거
-            df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
-            return df
-
-        df_m = get_ws_df('품목표', ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
-        df_map = get_ws_df('매핑정보', ['Box번호', '품목코드', '수량'])
-        df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
-        df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
-        
-        if not df_map.empty:
-            df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
-            df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
-        
-        return df_m, df_map, df_l, df_d, True
-    except Exception:
-        return None, None, None, None, False
+            return df_m, df_map, df_l, df_d, True
+        except Exception as e:
+            st.error(f"데이터 로드 오류: {e}")
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), False
+    else:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), False
 
 def save_log_data(new_df):
     client = get_google_sheet_client()
@@ -114,7 +120,6 @@ def save_data(sheet_name, new_df):
                 up_df = new_df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
                 ws.update([up_df.columns.values.tolist()] + up_df.values.tolist())
             
-            # 데이터가 변경되었으므로 캐시 초기화 (다음 로드 때 반영되도록)
             st.cache_data.clear()
             return True
         except: return False
@@ -122,21 +127,12 @@ def save_data(sheet_name, new_df):
 
 def init_data():
     if 'df_master' not in st.session_state:
-        with st.spinner('서버에서 데이터를 불러오는 중...'):
-            m, map, l, d, is_cloud = load_data_from_google()
-            # 로드 실패 시 빈 프레임 생성
-            if m is None: 
-                m = pd.DataFrame(columns=['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
-                map = pd.DataFrame(columns=['Box번호', '품목코드', '수량'])
-                l = pd.DataFrame(columns=['날짜', '구분', 'Box번호', '위치', '파렛트'])
-                d = pd.DataFrame(columns=['Box번호', '품목코드', '규격', '압축코드'])
-                is_cloud = False
-            
-            st.session_state.df_master = m
-            st.session_state.df_mapping = map
-            st.session_state.df_log = l
-            st.session_state.df_details = d
-            st.session_state.is_cloud = is_cloud
+        m, map, l, d, is_cloud = load_data()
+        st.session_state.df_master = m
+        st.session_state.df_mapping = map
+        st.session_state.df_log = l
+        st.session_state.df_details = d
+        st.session_state.is_cloud = is_cloud
 
 def to_excel(df):
     output = io.BytesIO()
@@ -319,9 +315,6 @@ def save_buffer_to_cloud():
                 st.session_state.df_log = pd.concat([st.session_state.df_log, new_logs], ignore_index=True)
                 st.session_state.scan_buffer = []
                 st.session_state.proc_msg = ("success", "✅ 저장 완료!")
-                
-                # 저장 후 캐시 비우기 (다음 로드 때 최신 데이터 반영)
-                st.cache_data.clear()
                 st.rerun()
             else: st.error("저장 실패")
 
@@ -333,6 +326,8 @@ def refresh_all():
 
 # --- 메인 ---
 def main():
+    st.title("🏭 디지타스 창고 재고관리 (Ver.6.2)")
+    
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
     if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
