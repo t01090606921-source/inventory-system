@@ -46,44 +46,45 @@ def get_google_sheet_client():
         else: return None
     except: return None
 
-# --- 데이터 로드 ---
-def load_data():
+# --- [속도 개선 핵심] 데이터 로드 캐싱 ---
+# ttl=3600: 한번 불러오면 1시간 동안은 메모리에서 꺼내 씀 (속도 향상)
+@st.cache_data(ttl=3600, show_spinner=False) 
+def load_data_from_google():
     client = get_google_sheet_client()
-    if client:
-        try:
-            sh = client.open(SHEET_NAME)
-            def get_ws_df(name, cols):
-                try:
-                    ws = sh.worksheet(name)
-                    records = ws.get_all_records()
-                    df = pd.DataFrame(records)
-                    if df.empty: df = pd.DataFrame(columns=cols)
-                except:
-                    ws = sh.add_worksheet(title=name, rows=1000, cols=20)
-                    ws.append_row(cols)
-                    df = pd.DataFrame(columns=cols)
-                
-                for c in cols:
-                    if c not in df.columns: df[c] = ""
-                
-                df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
-                return df
+    if not client: return None, None, None, None, False
 
-            df_m = get_ws_df('품목표', ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
-            df_map = get_ws_df('매핑정보', ['Box번호', '품목코드', '수량'])
-            df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
-            df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
+    try:
+        sh = client.open(SHEET_NAME)
+        def get_ws_df(name, cols):
+            try:
+                ws = sh.worksheet(name)
+                records = ws.get_all_records()
+                df = pd.DataFrame(records)
+                if df.empty: df = pd.DataFrame(columns=cols)
+            except:
+                ws = sh.add_worksheet(title=name, rows=1000, cols=20)
+                ws.append_row(cols)
+                df = pd.DataFrame(columns=cols)
             
-            if not df_map.empty:
-                df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
-                df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
+            for c in cols:
+                if c not in df.columns: df[c] = ""
             
-            return df_m, df_map, df_l, df_d, True
-        except Exception as e:
-            st.error(f"데이터 로드 오류: {e}")
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), False
-    else:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), False
+            # 데이터 문자열 변환 및 소수점 제거
+            df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
+            return df
+
+        df_m = get_ws_df('품목표', ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
+        df_map = get_ws_df('매핑정보', ['Box번호', '품목코드', '수량'])
+        df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
+        df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
+        
+        if not df_map.empty:
+            df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
+            df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
+        
+        return df_m, df_map, df_l, df_d, True
+    except Exception:
+        return None, None, None, None, False
 
 def save_log_data(new_df):
     client = get_google_sheet_client()
@@ -112,18 +113,30 @@ def save_data(sheet_name, new_df):
                 ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=20)
                 up_df = new_df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
                 ws.update([up_df.columns.values.tolist()] + up_df.values.tolist())
+            
+            # 데이터가 변경되었으므로 캐시 초기화 (다음 로드 때 반영되도록)
+            st.cache_data.clear()
             return True
         except: return False
     return False
 
 def init_data():
     if 'df_master' not in st.session_state:
-        m, map, l, d, is_cloud = load_data()
-        st.session_state.df_master = m
-        st.session_state.df_mapping = map
-        st.session_state.df_log = l
-        st.session_state.df_details = d
-        st.session_state.is_cloud = is_cloud
+        with st.spinner('서버에서 데이터를 불러오는 중...'):
+            m, map, l, d, is_cloud = load_data_from_google()
+            # 로드 실패 시 빈 프레임 생성
+            if m is None: 
+                m = pd.DataFrame(columns=['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
+                map = pd.DataFrame(columns=['Box번호', '품목코드', '수량'])
+                l = pd.DataFrame(columns=['날짜', '구분', 'Box번호', '위치', '파렛트'])
+                d = pd.DataFrame(columns=['Box번호', '품목코드', '규격', '압축코드'])
+                is_cloud = False
+            
+            st.session_state.df_master = m
+            st.session_state.df_mapping = map
+            st.session_state.df_log = l
+            st.session_state.df_details = d
+            st.session_state.is_cloud = is_cloud
 
 def to_excel(df):
     output = io.BytesIO()
@@ -141,7 +154,7 @@ def get_sample_file():
     }
     return to_excel(pd.DataFrame(sample_data))
 
-# --- 랙 맵 (이름 통일됨) ---
+# --- 랙 맵 ---
 def render_rack_map_interactive(stock_df, highlight_locs=None):
     if highlight_locs is None: highlight_locs = []
     rack_summary = {}
@@ -180,7 +193,6 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
     c_left, c_mid, c_right = st.columns([3.5, 0.1, 0.8])
     
     with c_left:
-        # Group 1 (Rack 6)
         cols = st.columns(7)
         for c_idx in range(7):
             rack_key = f"6-{c_idx+1}"
@@ -190,26 +202,46 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
         st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
         
-        # Group 2 (Rack 5, 4)
-        for r_num in [5, 4]:
-            cols = st.columns(7)
-            for c_idx in range(7):
-                rack_key = f"{r_num}-{c_idx+1}"
-                qty = rack_summary.get(rack_key, 0)
-                label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-                cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+        cols = st.columns(7)
+        for c_idx in range(7):
+            rack_key = f"5-{c_idx+1}"
+            qty = rack_summary.get(rack_key, 0)
+            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+        
+        cols = st.columns(7)
+        for c_idx in range(7):
+            rack_key = f"4-{c_idx+1}"
+            qty = rack_summary.get(rack_key, 0)
+            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
         st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
         
-        # Group 3 (Rack 3, 2, 1)
-        for r_num in [3, 2, 1]:
-            cols = st.columns(7)
-            for c_idx in range(7):
-                rack_key = f"{r_num}-{c_idx+1}"
-                qty = rack_summary.get(rack_key, 0)
-                label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
-                cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+        cols = st.columns(7)
+        for c_idx in range(7):
+            rack_key = f"3-{c_idx+1}"
+            qty = rack_summary.get(rack_key, 0)
+            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+        
+        cols = st.columns(7)
+        for c_idx in range(7):
+            rack_key = f"2-{c_idx+1}"
+            qty = rack_summary.get(rack_key, 0)
+            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
+            
+        cols = st.columns(7)
+        for c_idx in range(7):
+            rack_key = f"1-{c_idx+1}"
+            qty = rack_summary.get(rack_key, 0)
+            label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+            is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
+            cols[c_idx].button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
 
     with c_mid:
         st.markdown('<div class="rack-divider"></div>', unsafe_allow_html=True)
@@ -287,18 +319,20 @@ def save_buffer_to_cloud():
                 st.session_state.df_log = pd.concat([st.session_state.df_log, new_logs], ignore_index=True)
                 st.session_state.scan_buffer = []
                 st.session_state.proc_msg = ("success", "✅ 저장 완료!")
+                
+                # 저장 후 캐시 비우기 (다음 로드 때 최신 데이터 반영)
+                st.cache_data.clear()
                 st.rerun()
             else: st.error("저장 실패")
 
 def refresh_all():
     st.cache_data.clear()
     if 'data_loaded' in st.session_state: del st.session_state.data_loaded
+    if 'df_master' in st.session_state: del st.session_state.df_master
     st.rerun()
 
 # --- 메인 ---
 def main():
-    st.title("🏭 디지타스 창고 재고관리 (Ver.6.1)")
-    
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
     if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
@@ -380,7 +414,6 @@ def main():
                     return (len(p)>=3 and f"{p[0]}-{p[2]}"==sel) or (len(p)==2 and f"{p[0]}-{p[1]}"==sel)
                 filtered_df = filtered_df[filtered_df['위치'].apply(check_loc)]
 
-            # [수정] 올바른 함수 이름 호출
             c_map, c_list = st.columns([1.5, 1])
             with c_map:
                 st.markdown("##### 🗺️ 창고 배치도")
