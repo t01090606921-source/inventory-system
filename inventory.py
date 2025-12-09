@@ -12,7 +12,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(Supabase)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.7.7)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.7.8)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -69,37 +69,31 @@ def load_data_from_db():
 def clear_cache():
     st.cache_data.clear()
 
-# --- [4] 재고 현황 계산 (여기가 핵심! 강력 매칭) ---
+# --- [4] 재고 현황 계산 ---
 @st.cache_data(show_spinner=False)
 def calculate_stock_snapshot(df_log, df_mapping, df_master):
     if df_log.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # 1. 최신 상태 계산
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])].copy()
     
-    # [강력 매칭] 모든 키 값을 대문자+공백제거로 통일시켜서 억지로라도 붙임
     if not stock_boxes.empty:
         stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
     
     if not df_mapping.empty:
         df_mapping['match_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
-        # 품목코드도 정제
         if '품목코드' in df_mapping.columns:
             df_mapping['품목코드'] = df_mapping['품목코드'].astype(str).str.strip().str.upper()
 
     if not df_master.empty and '품목코드' in df_master.columns:
         df_master['품목코드'] = df_master['품목코드'].astype(str).str.strip().str.upper()
 
-    # 2. 정보 병합 (match_key 기준)
+    # 병합
     merged = pd.merge(stock_boxes, df_mapping, on='match_key', how='left', suffixes=('', '_map'))
-    
-    # 3. 정리
     merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
     merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
     
-    # 4. 마스터 정보 병합
     if not df_master.empty and '품목코드' in merged.columns:
         merged = pd.merge(merged, df_master, on='품목코드', how='left')
     
@@ -133,7 +127,7 @@ def insert_log(new_data_list):
                 "파렛트": item.get("파렛트", "")
             })
         supabase.table("입출고").insert(cleaned_list).execute()
-        clear_cache() # 캐시 삭제
+        clear_cache()
         return True
     except Exception as e:
         st.error(f"❌ 저장 실패: {e}")
@@ -144,10 +138,8 @@ def upsert_master_data(table_name, df, key_col):
     if df.empty: return False
     try:
         df = df.astype(str)
-        # 키 컬럼 대문자화
         if key_col in df.columns:
             df[key_col] = df[key_col].str.strip().str.upper()
-            
         df = df.where(pd.notnull(df), None)
         data = df.to_dict(orient='records')
         supabase.table(table_name).upsert(data, on_conflict=key_col).execute()
@@ -260,7 +252,6 @@ def buffer_scan(df_master, df_mapping, df_log):
     
     # 매핑 확인 (대문자 변환 후 비교)
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
-        # 임시로 대문자 컬럼 생성해서 비교
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
         
@@ -269,7 +260,6 @@ def buffer_scan(df_master, df_mapping, df_log):
             disp_qty = map_info.iloc[0]['수량']
             
             if not df_master.empty and '품목코드' in df_master.columns:
-                # 마스터도 대문자 변환 후 비교
                 df_master['temp_key'] = df_master['품목코드'].astype(str).str.strip().str.upper()
                 m_info = df_master[df_master['temp_key'] == p_code.upper()]
                 if not m_info.empty:
@@ -314,7 +304,7 @@ def main():
     init_session_state()
     df_master, df_mapping, df_log, df_details = load_data_from_db()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터", "6. 데이터 진단"])
 
     with tab1:
         c_h, c_r = st.columns([4, 1])
@@ -356,6 +346,8 @@ def main():
 
             d1, d2, d3 = st.columns(3)
             with d1: st.download_button("📥 재고 요약 다운로드", to_excel(merged), "재고요약.xlsx", use_container_width=True)
+            # [버튼 복구] 상세 내역 다운로드
+            with d2: st.download_button("📥 전체 상세 내역 다운로드", to_excel(df_details), "상세내역.xlsx", use_container_width=True)
             
             st.divider()
             
@@ -415,7 +407,7 @@ def main():
             with st.spinner("업로드 중..."):
                 if insert_log(log_list):
                     st.success("완료!")
-                    st.rerun() # [자동 새로고침 추가]
+                    st.rerun()
 
     with tab4:
         st.subheader("📦 포장데이터(마스터) 등록")
@@ -459,11 +451,28 @@ def main():
                     
                     clear_cache()
                     st.success("✅ 등록 완료!")
-                    st.rerun() # [자동 새로고침 추가]
+                    st.rerun()
             except Exception as e: st.error(f"오류: {e}")
 
     with tab5:
         st.dataframe(df_master)
+
+    # [새로운 기능] 데이터 진단 탭
+    with tab6:
+        st.subheader("🕵️‍♀️ 데이터 진단 (관리자용)")
+        st.info("DB에 데이터가 실제로 얼마나 들어있는지 눈으로 확인하는 곳입니다.")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**1. 포장데이터(매핑정보) - 총 {len(df_mapping)}건**")
+            st.dataframe(df_mapping.head(100), use_container_width=True)
+        with c2:
+            st.markdown(f"**2. 입출고내역 - 총 {len(df_log)}건**")
+            st.dataframe(df_log.head(100), use_container_width=True)
+
+        st.divider()
+        st.write("▼ 품목 마스터 (총 {}건)".format(len(df_master)))
+        st.dataframe(df_master.head(50))
 
 if __name__ == '__main__':
     main()
