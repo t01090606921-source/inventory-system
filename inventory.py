@@ -19,7 +19,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.6.7)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.6.8)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -187,9 +187,9 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             else: k = raw_loc
             rack_summary[k] = rack_summary.get(k, 0) + 1
 
+    # [수정] map-container 스타일 제거
     st.markdown("""
     <style>
-    .map-container { border: 2px solid #e0e0e0; border-radius: 10px; padding: 15px; background-color: #f9f9f9; }
     div[data-testid="column"] button { width: 100%; height: 40px !important; margin: 1px 0px !important; padding: 0px !important; font-size: 10px !important; font-weight: 700 !important; border-radius: 4px !important; border: 1px solid #ccc; }
     div[data-testid="column"] button:hover { border-color: #333 !important; transform: scale(1.05); z-index: 5; }
     button[kind="primary"] { background-color: #ffcdd2 !important; color: #b71c1c !important; border: 2px solid #d32f2f !important; }
@@ -204,7 +204,7 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
         st.session_state.selected_rack = key
         st.session_state.filter_mode = 'rack'
 
-    st.markdown('<div class="map-container">', unsafe_allow_html=True)
+    # [수정] map-container div 제거
     c_left, c_mid, c_right = st.columns([3.5, 0.1, 0.8])
     
     with c_left:
@@ -243,7 +243,6 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
             is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
             st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- 스캔 로직 ---
 def buffer_scan():
@@ -333,7 +332,6 @@ def main():
         c_h, c_r = st.columns([4, 1])
         with c_h: 
             st.subheader("🚀 스캔 작업")
-            # [안내 문구 추가]
             st.info("ℹ️ **안정적인 저장을 위해 10건 미만으로 스캔 후 저장해주세요.**")
         with c_r: 
             if st.button("🔄 새로고침", use_container_width=True, key='r1'): clear_cache_and_reload()
@@ -351,7 +349,6 @@ def main():
         with c4: st.text_input("Box 번호 스캔", key="scan_input", on_change=buffer_scan)
 
         if st.session_state.scan_buffer:
-            # [경고 문구 추가] 10건 넘어가면 경고
             if len(st.session_state.scan_buffer) >= 10:
                 st.warning(f"⚠️ 현재 {len(st.session_state.scan_buffer)}건 대기 중입니다. 오류 방지를 위해 지금 [구글 시트에 저장]을 눌러주세요.")
             
