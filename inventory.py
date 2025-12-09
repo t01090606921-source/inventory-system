@@ -19,7 +19,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.6.6)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.6.7)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -46,7 +46,7 @@ def get_google_sheet_client():
         else: return None
     except: return None
 
-# --- [3] 데이터 로드 (캐싱 적용) ---
+# --- [3] 데이터 로드 (캐싱) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_data_from_google():
     client = get_google_sheet_client()
@@ -85,23 +85,19 @@ def load_data_from_google():
     else:
         return None, None, None, None, False
 
-# --- [4] 재고 현황 계산 (핵심 속도 개선: 계산 결과 캐싱) ---
-# 이 함수는 데이터가 바뀌지 않는 한 재실행되지 않으므로 랙 선택/검색 시 딜레이가 사라짐
+# --- [4] 재고 현황 계산 (캐싱) ---
 @st.cache_data(show_spinner=False)
 def calculate_stock_snapshot(df_log, df_mapping, df_master):
     if df_log.empty:
-        return pd.DataFrame(), pd.DataFrame() # 빈 결과 반환
+        return pd.DataFrame(), pd.DataFrame()
 
-    # 1. 최신 상태 계산 (가장 무거운 작업)
     last_stat = df_log.sort_values('날짜').groupby('Box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])]
     
-    # 2. 정보 병합
     merged = pd.merge(stock_boxes, df_mapping, on='Box번호', how='left')
     merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
     merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
     
-    # 3. 마스터 정보 병합
     merged = pd.merge(merged, df_master, on='품목코드', how='left')
     
     return stock_boxes, merged
@@ -181,9 +177,7 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
     if highlight_locs is None: highlight_locs = []
     rack_summary = {}
     
-    # 맵 데이터 계산도 간단하게 최적화
     if not stock_df.empty:
-        # 위치 정보만 빠르게 추출
         locs = stock_df['위치'].astype(str).str.strip()
         for raw_loc in locs:
             if not raw_loc or raw_loc == '미지정': continue
@@ -260,7 +254,6 @@ def buffer_scan():
     
     if not scan_val: return
 
-    # 캐시된 데이터프레임 사용 (빠름)
     df_mapping = st.session_state.df_mapping
     df_master = st.session_state.df_master
     df_log = st.session_state.df_log
@@ -276,20 +269,16 @@ def buffer_scan():
             disp_name = m_info.iloc[0]['품명']
             disp_spec = m_info.iloc[0]['규격']
 
-    # 상태 체크도 판다스 연산 최소화
+    box_logs = pd.DataFrame()
+    if 'Box번호' in df_log.columns:
+        box_logs = df_log[df_log['Box번호'] == scan_val].sort_values(by='날짜', ascending=False)
+    
     box_status, current_db_loc = "신규", "미지정"
-    # 로그가 있을 때만 조회
-    if not df_log.empty and 'Box번호' in df_log.columns:
-        # 전체 정렬 대신 해당 박스만 필터링 후 확인 (속도 개선)
-        my_logs = df_log[df_log['Box번호'] == scan_val]
-        if not my_logs.empty:
-            # 마지막 날짜 찾기
-            last_log = my_logs.loc[my_logs['날짜'].idxmax()] if not my_logs.empty else None
-            if last_log is not None:
-                last_action = last_log['구분']
-                current_db_loc = last_log['위치']
-                if last_action in ['입고', '이동']: box_status = f"창고있음({current_db_loc})"
-                elif last_action == '출고': box_status = "출고됨"
+    if not box_logs.empty:
+        last_action = box_logs.iloc[0]['구분']
+        current_db_loc = box_logs.iloc[0]['위치']
+        if last_action in ['입고', '이동']: box_status = f"창고있음({current_db_loc})"
+        elif last_action == '출고': box_status = "출고됨"
 
     is_duplicate = (mode == "입고" and "창고있음" in box_status)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -319,9 +308,10 @@ def save_buffer_to_cloud():
     if st.session_state.is_cloud:
         with st.spinner('저장 중...'):
             if save_log_data(new_logs):
-                clear_cache_and_reload() # 저장 후에는 반드시 캐시 초기화
+                clear_cache_and_reload()
                 st.session_state.scan_buffer = []
                 st.session_state.proc_msg = ("success", "✅ 저장 완료!")
+                st.rerun()
             else: st.error("저장 실패")
 
 # --- 메인 ---
@@ -341,7 +331,10 @@ def main():
 
     with tab1:
         c_h, c_r = st.columns([4, 1])
-        with c_h: st.subheader("🚀 스캔 작업")
+        with c_h: 
+            st.subheader("🚀 스캔 작업")
+            # [안내 문구 추가]
+            st.info("ℹ️ **안정적인 저장을 위해 10건 미만으로 스캔 후 저장해주세요.**")
         with c_r: 
             if st.button("🔄 새로고침", use_container_width=True, key='r1'): clear_cache_and_reload()
 
@@ -358,6 +351,10 @@ def main():
         with c4: st.text_input("Box 번호 스캔", key="scan_input", on_change=buffer_scan)
 
         if st.session_state.scan_buffer:
+            # [경고 문구 추가] 10건 넘어가면 경고
+            if len(st.session_state.scan_buffer) >= 10:
+                st.warning(f"⚠️ 현재 {len(st.session_state.scan_buffer)}건 대기 중입니다. 오류 방지를 위해 지금 [구글 시트에 저장]을 눌러주세요.")
+            
             disp_df = pd.DataFrame(st.session_state.scan_buffer)
             cols_order = ['날짜', '구분', 'Box번호', '품목코드', '규격', '수량', '위치', '파렛트']
             final_cols = [c for c in cols_order if c in disp_df.columns]
@@ -368,7 +365,6 @@ def main():
         if st.button("🗑️ 목록 비우기", use_container_width=True): st.session_state.scan_buffer = []
 
     with tab2:
-        # [속도 개선] 계산된 결과를 캐시에서 가져옴
         stock_boxes, merged = calculate_stock_snapshot(df_log, df_mapping, df_master)
 
         if merged.empty:
@@ -385,10 +381,9 @@ def main():
             with sc2: exact_match = st.checkbox("정확히 일치")
             with sc3: search_query = st.text_input("검색어", key="sq")
 
-            filtered_df = merged # 복사본 대신 원본 참조 (메모리 절약)
+            filtered_df = merged
             hl_list = []
 
-            # 검색 로직
             if search_query:
                 q = search_query.strip()
                 if search_target == "전체":
@@ -409,11 +404,9 @@ def main():
                     if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
                     elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
             
-            # 랙 선택 로직
             if st.session_state.selected_rack:
                 sel = st.session_state.selected_rack
                 hl_list.append(sel)
-                # 벡터화된 연산으로 속도 향상 시도
                 def check_loc_fast(l):
                     if not l: return False
                     return l.endswith(f"-{sel.split('-')[-1]}") and l.startswith(sel.split('-')[0])
