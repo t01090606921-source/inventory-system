@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.9.1)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.9.2)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -123,7 +123,7 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
             
     return stock_boxes, merged, filtered_details
 
-# --- 데이터 업로드 (청킹 & 에러처리 강화) ---
+# --- 데이터 업로드 (청킹) ---
 def chunked_upsert(table_name, df, key_col, batch_size=1000):
     if not supabase: return False
     if df.empty: return False
@@ -134,7 +134,6 @@ def chunked_upsert(table_name, df, key_col, batch_size=1000):
         total_rows = len(df)
         chunks = math.ceil(total_rows / batch_size)
         my_bar = st.progress(0, text=f"{table_name} 업로드...")
-        
         for i in range(chunks):
             start = i * batch_size
             end = start + batch_size
@@ -145,40 +144,30 @@ def chunked_upsert(table_name, df, key_col, batch_size=1000):
         my_bar.empty()
         return True
     except Exception as e:
-        st.error(f"❌ {table_name} 업로드 실패: {e}")
+        st.error(f"❌ {table_name} 실패: {e}")
         return False
 
 def chunked_insert(table_name, df, batch_size=1000):
     if not supabase: return False
     if df.empty: return False
     try:
-        # 데이터 정제 (중요: NaN -> None)
         df = df.where(pd.notnull(df), None)
         total_rows = len(df)
         chunks = math.ceil(total_rows / batch_size)
-        
         my_bar = st.progress(0, text=f"{table_name} 추가 중...")
-        
         for i in range(chunks):
             start = i * batch_size
             end = start + batch_size
             chunk = df.iloc[start:end]
             data = chunk.to_dict(orient='records')
-            
-            try:
-                supabase.table(table_name).insert(data).execute()
-            except Exception as inner_e:
-                st.error(f"⚠️ 일부 데이터 저장 실패: {inner_e}")
-                
+            supabase.table(table_name).insert(data).execute()
             my_bar.progress(min((i+1)/chunks, 1.0))
-            
         my_bar.empty()
         return True
     except Exception as e:
-        st.error(f"❌ {table_name} 프로세스 실패: {e}")
+        st.error(f"❌ {table_name} 실패: {e}")
         return False
 
-# 단건 저장 (스캔용)
 def insert_log(new_data_list):
     if not supabase: return False
     try:
@@ -195,7 +184,7 @@ def insert_log(new_data_list):
         clear_cache()
         return True
     except Exception as e:
-        st.error(f"❌ 저장 실패: {e}")
+        st.error(f"실패: {e}")
         return False
 
 # --- 유틸리티 ---
@@ -222,8 +211,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     if not scan_val: return
 
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
-    
-    # 매핑 확인
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
@@ -237,17 +224,15 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
                     disp_name = m_info.iloc[0]['품명']
                     disp_spec = m_info.iloc[0]['규격']
 
-    # 압축코드 확인
     is_compressed = False
     target_box_no = scan_val
-    if p_code == "정보없음": # 매핑 안됐으면 압축코드인지 확인
+    if p_code == "정보없음":
         if not df_details.empty and '압축코드' in df_details.columns:
             df_details['temp_code'] = df_details['압축코드'].astype(str).str.strip().str.upper()
             matched = df_details[df_details['temp_code'] == scan_val]
             if not matched.empty:
                 target_box_no = str(matched.iloc[0]['box번호']).strip().upper()
                 is_compressed = True
-                # 다시 정보 조회
                 if not df_mapping.empty:
                     df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
                     map_info = df_mapping[df_mapping['temp_key'] == target_box_no]
@@ -289,7 +274,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             st.session_state.proc_msg = ("success", f"✅ {msg_prefix}{mode}: {target_box_no}")
     st.session_state.scan_input = ""
 
-# --- [핵심] 재고 현황 탭 ---
 @st.fragment
 def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     if df_log.empty:
@@ -461,24 +445,34 @@ def main():
             try:
                 df = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
                 
-                # [수정] 업로드용 데이터 강제 정규화
+                # [수정] 업로드 전처리 강화 (헤더 정리 및 매핑)
+                # 1. 컬럼명 공백 제거
+                df.columns = df.columns.str.strip().str.replace(' ', '') 
+                
+                # 2. 필수 컬럼 매핑 확인 ('Box번호', 'box번호', 'BoxNo' 등 대응)
+                col_map = {}
+                for c in df.columns:
+                    if 'box' in c.lower() or '박스' in c: col_map[c] = 'box번호'
+                    elif '날짜' in c: col_map[c] = '날짜'
+                    elif '구분' in c: col_map[c] = '구분'
+                    elif '위치' in c: col_map[c] = '위치'
+                    elif '파렛트' in c or '팔레트' in c: col_map[c] = '파렛트'
+                
+                df.rename(columns=col_map, inplace=True)
+
+                if 'box번호' not in df.columns:
+                    st.error(f"❌ 'Box번호' 컬럼을 찾을 수 없습니다. (발견된 컬럼: {list(df.columns)})")
+                    st.stop()
+
+                # 3. 데이터 정제
                 clean_df = pd.DataFrame()
-                # 엑셀의 날짜 컬럼을 문자로 변환 (NaN 방지)
                 clean_df['날짜'] = df['날짜'].astype(str).replace('nan', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 clean_df['구분'] = df['구분'].astype(str)
-                
-                # Box번호 매핑 (대문자+공백제거)
-                if 'Box번호' in df.columns:
-                    clean_df['box번호'] = df['Box번호'].astype(str).str.strip().str.upper()
-                elif 'box번호' in df.columns:
-                    clean_df['box번호'] = df['box번호'].astype(str).str.strip().str.upper()
-                else:
-                    st.error("❌ 엑셀에 'Box번호' 컬럼이 없습니다.")
-                    st.stop()
-                    
-                clean_df['위치'] = df['위치'].astype(str).replace('nan', '')
-                clean_df['파렛트'] = df['파렛트'].astype(str).replace('nan', '')
+                clean_df['box번호'] = df['box번호'].astype(str).str.strip().str.upper() # 대문자 강제
+                clean_df['위치'] = df['위치'].astype(str).replace('nan', '') if '위치' in df.columns else ''
+                clean_df['파렛트'] = df['파렛트'].astype(str).replace('nan', '') if '파렛트' in df.columns else ''
 
+                # 4. 업로드 시작
                 if chunked_insert('입출고', clean_df):
                     st.success(f"✅ 총 {len(clean_df)}건 업로드 완료!")
                     clear_cache()
