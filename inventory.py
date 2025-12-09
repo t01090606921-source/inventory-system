@@ -2,14 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import io
-
-# 구글 시트 라이브러리
-try:
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-except ImportError:
-    st.error("라이브러리 설치 필요. requirements.txt 확인")
-    st.stop()
+from supabase import create_client, Client
 
 # --- [1] 로그인 보안 ---
 def check_password():
@@ -18,8 +11,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.6.8)")
+    st.set_page_config(page_title="재고관리(Supabase)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.7.1 - 진단모드)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -32,130 +25,87 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- [2] 구글 시트 연결 ---
-SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-SHEET_NAME = '재고관리_데이터'
-
-def get_google_sheet_client():
+# --- [2] Supabase 연결 설정 ---
+@st.cache_resource
+def init_connection():
     try:
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-            client = gspread.authorize(creds)
-            return client
-        else: return None
-    except: return None
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+        return create_client(url, key)
+    except Exception as e:
+        st.error(f"❌ Supabase 연결 실패: {e}")
+        return None
 
-# --- [3] 데이터 로드 (캐싱) ---
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_data_from_google():
-    client = get_google_sheet_client()
-    if client:
-        try:
-            sh = client.open(SHEET_NAME)
-            def get_ws_df(name, cols):
-                try:
-                    ws = sh.worksheet(name)
-                    records = ws.get_all_records()
-                    df = pd.DataFrame(records)
-                    if df.empty: df = pd.DataFrame(columns=cols)
-                except:
-                    ws = sh.add_worksheet(title=name, rows=1000, cols=20)
-                    ws.append_row(cols)
-                    df = pd.DataFrame(columns=cols)
-                
-                for c in cols:
-                    if c not in df.columns: df[c] = ""
-                
-                df = df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
-                return df
+supabase = init_connection()
 
-            df_m = get_ws_df('품목표', ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드'])
-            df_map = get_ws_df('매핑정보', ['Box번호', '품목코드', '수량'])
-            df_l = get_ws_df('입출고', ['날짜', '구분', 'Box번호', '위치', '파렛트'])
-            df_d = get_ws_df('상세내역', ['Box번호', '품목코드', '규격', '압축코드'])
-            
-            if not df_map.empty:
-                df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
-                df_map = df_map.drop_duplicates(subset=['Box번호'], keep='last')
-            
-            return df_m, df_map, df_l, df_d, True
-        except Exception:
-            return None, None, None, None, False
-    else:
-        return None, None, None, None, False
-
-# --- [4] 재고 현황 계산 (캐싱) ---
-@st.cache_data(show_spinner=False)
-def calculate_stock_snapshot(df_log, df_mapping, df_master):
-    if df_log.empty:
-        return pd.DataFrame(), pd.DataFrame()
-
-    last_stat = df_log.sort_values('날짜').groupby('Box번호').tail(1)
-    stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])]
+# --- 데이터 로드 (캐싱) ---
+@st.cache_data(ttl=60)
+def load_data_from_db():
+    if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
-    merged = pd.merge(stock_boxes, df_mapping, on='Box번호', how='left')
-    merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
-    merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
-    
-    merged = pd.merge(merged, df_master, on='품목코드', how='left')
-    
-    return stock_boxes, merged
+    try:
+        # 데이터 가져오기 (데이터가 없으면 빈 리스트 반환됨)
+        res_m = supabase.table("품목표").select("*").execute()
+        df_m = pd.DataFrame(res_m.data)
+        
+        res_map = supabase.table("매핑정보").select("*").execute()
+        df_map = pd.DataFrame(res_map.data)
+        
+        res_l = supabase.table("입출고").select("*").order("id", desc=True).execute()
+        df_l = pd.DataFrame(res_l.data)
+        
+        res_d = supabase.table("상세내역").select("*").execute()
+        df_d = pd.DataFrame(res_d.data)
 
-def clear_cache_and_reload():
+        return df_m, df_map, df_l, df_d
+    except Exception as e:
+        # 테이블이 아직 없을 수도 있음
+        st.error(f"⚠️ 데이터 불러오기 오류: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+def clear_cache():
     st.cache_data.clear()
-    if 'data_loaded' in st.session_state: del st.session_state.data_loaded
-    st.rerun()
 
-def save_log_data(new_df):
-    client = get_google_sheet_client()
-    if client:
-        try:
-            sh = client.open(SHEET_NAME)
-            ws = sh.worksheet('입출고')
-            save_cols = ['날짜', '구분', 'Box번호', '위치', '파렛트']
-            valid_df = new_df[save_cols].astype(str).apply(lambda x: x.str.strip())
-            ws.append_rows(valid_df.values.tolist())
-            return True
-        except: return False
-    return True
+# --- 데이터 저장 함수들 ---
+def insert_log(new_data_list):
+    if not supabase: return False
+    try:
+        cleaned_list = []
+        for item in new_data_list:
+            cleaned_list.append({
+                "날짜": item.get("날짜"),
+                "구분": item.get("구분"),
+                "Box번호": item.get("Box번호"),
+                "위치": item.get("위치", ""),
+                "파렛트": item.get("파렛트", "")
+            })
+        supabase.table("입출고").insert(cleaned_list).execute()
+        clear_cache()
+        return True
+    except Exception as e:
+        st.error(f"❌ 입출고 저장 실패: {e}")
+        return False
 
-def save_data(sheet_name, new_df):
-    client = get_google_sheet_client()
-    if client:
-        try:
-            sh = client.open(SHEET_NAME)
-            try:
-                ws = sh.worksheet(sheet_name)
-                ws.clear()
-                up_df = new_df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
-                ws.update([up_df.columns.values.tolist()] + up_df.values.tolist())
-            except:
-                ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=20)
-                up_df = new_df.astype(str).apply(lambda x: x.str.replace(r'\.0$', '', regex=True).str.strip())
-                ws.update([up_df.columns.values.tolist()] + up_df.values.tolist())
-            st.cache_data.clear()
-            return True
-        except: return False
-    return False
+def upsert_master_data(table_name, df, key_col):
+    if not supabase: return False
+    if df.empty:
+        st.warning(f"⚠️ {table_name}에 등록할 데이터가 없습니다.")
+        return False
+    try:
+        data = df.to_dict(orient='records')
+        supabase.table(table_name).upsert(data, on_conflict=key_col).execute()
+        return True
+    except Exception as e:
+        st.error(f"❌ {table_name} 등록 실패: {e}")
+        return False
 
-def init_data():
-    if 'df_master' not in st.session_state:
-        with st.spinner('데이터 로딩 중...'):
-            m, map, l, d, is_cloud = load_data_from_google()
-            if m is None:
-                m = pd.DataFrame(columns=['품목코드', '품명'])
-                map = pd.DataFrame(columns=['Box번호', '품목코드'])
-                l = pd.DataFrame(columns=['Box번호', '날짜'])
-                d = pd.DataFrame(columns=['Box번호'])
-                is_cloud = False
-            
-            st.session_state.df_master = m
-            st.session_state.df_mapping = map
-            st.session_state.df_log = l
-            st.session_state.df_details = d
-            st.session_state.is_cloud = is_cloud
+# --- 초기화 ---
+def init_session_state():
+    if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
+    if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
+    if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
 
+# --- 엑셀 다운로드 ---
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -173,11 +123,11 @@ def get_sample_file():
     return to_excel(pd.DataFrame(sample_data))
 
 # --- 랙 맵 ---
-def render_rack_map_interactive(stock_df, highlight_locs=None):
+def render_rack_map(stock_df, highlight_locs=None):
     if highlight_locs is None: highlight_locs = []
     rack_summary = {}
     
-    if not stock_df.empty:
+    if not stock_df.empty and '위치' in stock_df.columns:
         locs = stock_df['위치'].astype(str).str.strip()
         for raw_loc in locs:
             if not raw_loc or raw_loc == '미지정': continue
@@ -187,7 +137,6 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             else: k = raw_loc
             rack_summary[k] = rack_summary.get(k, 0) + 1
 
-    # [수정] map-container 스타일 제거
     st.markdown("""
     <style>
     div[data-testid="column"] button { width: 100%; height: 40px !important; margin: 1px 0px !important; padding: 0px !important; font-size: 10px !important; font-weight: 700 !important; border-radius: 4px !important; border: 1px solid #ccc; }
@@ -202,16 +151,13 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
 
     def rack_click(key):
         st.session_state.selected_rack = key
-        st.session_state.filter_mode = 'rack'
 
-    # [수정] map-container div 제거
     c_left, c_mid, c_right = st.columns([3.5, 0.1, 0.8])
-    
     with c_left:
         for r_num in [6]:
             cols = st.columns(7)
             for c_idx, col in enumerate(cols):
-                rack_key = f"{r_num}-{c_idx+1}"
+                rack_key = f"6-{c_idx+1}"
                 qty = rack_summary.get(rack_key, 0)
                 label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
                 is_hl = (rack_key in highlight_locs) or (rack_key == st.session_state.selected_rack)
@@ -245,7 +191,7 @@ def render_rack_map_interactive(stock_df, highlight_locs=None):
             st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
 
 # --- 스캔 로직 ---
-def buffer_scan():
+def buffer_scan(df_master, df_mapping, df_log):
     scan_val = str(st.session_state.scan_input).strip()
     mode = st.session_state.work_mode
     curr_loc = str(st.session_state.get('curr_location', '')).strip()
@@ -253,31 +199,27 @@ def buffer_scan():
     
     if not scan_val: return
 
-    df_mapping = st.session_state.df_mapping
-    df_master = st.session_state.df_master
-    df_log = st.session_state.df_log
-
-    map_info = df_mapping[df_mapping['Box번호'] == scan_val]
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
-    
-    if not map_info.empty:
-        p_code = str(map_info.iloc[0]['품목코드']).strip()
-        disp_qty = map_info.iloc[0]['수량']
-        m_info = df_master[df_master['품목코드'] == p_code]
-        if not m_info.empty:
-            disp_name = m_info.iloc[0]['품명']
-            disp_spec = m_info.iloc[0]['규격']
+    if not df_mapping.empty and 'Box번호' in df_mapping.columns:
+        map_info = df_mapping[df_mapping['Box번호'] == scan_val]
+        if not map_info.empty:
+            p_code = str(map_info.iloc[0]['품목코드']).strip()
+            disp_qty = map_info.iloc[0]['수량']
+            if not df_master.empty and '품목코드' in df_master.columns:
+                m_info = df_master[df_master['품목코드'] == p_code]
+                if not m_info.empty:
+                    disp_name = m_info.iloc[0]['품명']
+                    disp_spec = m_info.iloc[0]['규격']
 
-    box_logs = pd.DataFrame()
-    if 'Box번호' in df_log.columns:
-        box_logs = df_log[df_log['Box번호'] == scan_val].sort_values(by='날짜', ascending=False)
-    
     box_status, current_db_loc = "신규", "미지정"
-    if not box_logs.empty:
-        last_action = box_logs.iloc[0]['구분']
-        current_db_loc = box_logs.iloc[0]['위치']
-        if last_action in ['입고', '이동']: box_status = f"창고있음({current_db_loc})"
-        elif last_action == '출고': box_status = "출고됨"
+    if not df_log.empty and 'Box번호' in df_log.columns:
+        my_logs = df_log[df_log['Box번호'] == scan_val]
+        if not my_logs.empty:
+            last_log = my_logs.iloc[0]
+            last_action = last_log['구분']
+            current_db_loc = last_log['위치']
+            if last_action in ['입고', '이동']: box_status = f"창고있음({current_db_loc})"
+            elif last_action == '출고': box_status = "출고됨"
 
     is_duplicate = (mode == "입고" and "창고있음" in box_status)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -301,40 +243,18 @@ def buffer_scan():
 
     st.session_state.scan_input = ""
 
-def save_buffer_to_cloud():
-    if not st.session_state.scan_buffer: return
-    new_logs = pd.DataFrame(st.session_state.scan_buffer)
-    if st.session_state.is_cloud:
-        with st.spinner('저장 중...'):
-            if save_log_data(new_logs):
-                clear_cache_and_reload()
-                st.session_state.scan_buffer = []
-                st.session_state.proc_msg = ("success", "✅ 저장 완료!")
-                st.rerun()
-            else: st.error("저장 실패")
-
 # --- 메인 ---
 def main():
-    if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
-    if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
-    if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
-    if 'filter_mode' not in st.session_state: st.session_state.filter_mode = 'all'
-
-    init_data()
-
-    df_master = st.session_state.df_master
-    df_mapping = st.session_state.df_mapping
-    df_log = st.session_state.df_log
+    init_session_state()
+    df_master, df_mapping, df_log, df_details = load_data_from_db()
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터"])
 
     with tab1:
         c_h, c_r = st.columns([4, 1])
-        with c_h: 
-            st.subheader("🚀 스캔 작업")
-            st.info("ℹ️ **안정적인 저장을 위해 10건 미만으로 스캔 후 저장해주세요.**")
+        with c_h: st.subheader("🚀 스캔 작업")
         with c_r: 
-            if st.button("🔄 새로고침", use_container_width=True, key='r1'): clear_cache_and_reload()
+            if st.button("🔄 새로고침", use_container_width=True, key='r1'): clear_cache(); st.rerun()
 
         if st.session_state.proc_msg:
             m_type, m_text = st.session_state.proc_msg
@@ -346,33 +266,41 @@ def main():
         with c1: st.radio("모드", ["입고", "재고이동", "출고", "조회(검색)"], horizontal=True, key="work_mode")
         with c2: st.text_input("적재 위치 (1-2-7)", key="curr_location")
         with c3: st.text_input("파렛트 이름", key="curr_palette")
-        with c4: st.text_input("Box 번호 스캔", key="scan_input", on_change=buffer_scan)
+        with c4: st.text_input("Box 번호 스캔", key="scan_input", on_change=buffer_scan, args=(df_master, df_mapping, df_log))
 
         if st.session_state.scan_buffer:
-            if len(st.session_state.scan_buffer) >= 10:
-                st.warning(f"⚠️ 현재 {len(st.session_state.scan_buffer)}건 대기 중입니다. 오류 방지를 위해 지금 [구글 시트에 저장]을 눌러주세요.")
-            
             disp_df = pd.DataFrame(st.session_state.scan_buffer)
             cols_order = ['날짜', '구분', 'Box번호', '품목코드', '규격', '수량', '위치', '파렛트']
             final_cols = [c for c in cols_order if c in disp_df.columns]
             st.dataframe(disp_df[final_cols].iloc[::-1], use_container_width=True)
         else: st.info("대기 중...")
         
-        if st.button("💾 구글 시트에 저장", use_container_width=True): save_buffer_to_cloud()
+        if st.button("💾 DB에 저장 (빠름)", type="primary", use_container_width=True): 
+            if insert_log(st.session_state.scan_buffer):
+                st.session_state.scan_buffer = []
+                st.session_state.proc_msg = ("success", "✅ 저장 완료!")
+                st.rerun()
         if st.button("🗑️ 목록 비우기", use_container_width=True): st.session_state.scan_buffer = []
 
     with tab2:
-        stock_boxes, merged = calculate_stock_snapshot(df_log, df_mapping, df_master)
-
-        if merged.empty:
+        if df_log.empty:
             st.info("데이터 없음")
         else:
+            last_stat = df_log.sort_values('id').groupby('Box번호').tail(1)
+            stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])]
+            
+            merged = pd.DataFrame()
+            if not stock_boxes.empty:
+                merged = pd.merge(stock_boxes, df_mapping, on='Box번호', how='left')
+                merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
+                merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
+                merged = pd.merge(merged, df_master, on='품목코드', how='left')
+
             d1, d2, d3 = st.columns(3)
             with d1: st.download_button("📥 재고 요약 다운로드", to_excel(merged), "재고요약.xlsx", use_container_width=True)
-            with d2: st.download_button("📥 전체 상세 내역", to_excel(st.session_state.df_details), "상세내역.xlsx", use_container_width=True)
             
             st.divider()
-
+            
             sc1, sc2, sc3 = st.columns([1, 1, 2])
             with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "Box번호"])
             with sc2: exact_match = st.checkbox("정확히 일치")
@@ -381,7 +309,7 @@ def main():
             filtered_df = merged
             hl_list = []
 
-            if search_query:
+            if search_query and not filtered_df.empty:
                 q = search_query.strip()
                 if search_target == "전체":
                     mask = (
@@ -393,27 +321,21 @@ def main():
                 else:
                     if exact_match: mask = filtered_df[search_target] == q
                     else: mask = filtered_df[search_target].astype(str).str.contains(q, na=False)
-                
                 filtered_df = filtered_df[mask]
-                
                 for loc in filtered_df['위치'].unique():
                     parts = str(loc).split('-')
                     if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
                     elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
             
-            if st.session_state.selected_rack:
+            if st.session_state.selected_rack and not filtered_df.empty:
                 sel = st.session_state.selected_rack
                 hl_list.append(sel)
-                def check_loc_fast(l):
-                    if not l: return False
-                    return l.endswith(f"-{sel.split('-')[-1]}") and l.startswith(sel.split('-')[0])
-                
                 filtered_df = filtered_df[filtered_df['위치'].apply(lambda x: str(x).startswith(sel.split('-')[0]) and str(x).endswith(sel.split('-')[-1]) if '-' in str(x) else False)]
 
             c_map, c_list = st.columns([1.5, 1])
             with c_map:
                 st.markdown("##### 🗺️ 창고 배치도")
-                render_rack_map_interactive(stock_boxes, hl_list)
+                render_rack_map(stock_boxes, hl_list)
             with c_list:
                 st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
                 st.dataframe(filtered_df, use_container_width=True, height=600)
@@ -422,42 +344,69 @@ def main():
         st.subheader("📤 입출고 내역 일괄 업로드")
         st.download_button("📥 샘플 양식 다운로드", get_sample_file(), "입출고_샘플.xlsx")
         up = st.file_uploader("엑셀 파일", type=['xlsx', 'csv'])
-        if up and st.button("구글 시트 업로드"):
+        if up and st.button("DB 업로드"):
             df = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
             if '날짜' not in df.columns: df['날짜'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for c in ['위치', '파렛트']: 
                 if c not in df.columns: df[c] = ""
+            log_list = df.to_dict(orient='records')
             with st.spinner("업로드 중..."):
-                if save_data('입출고', df[['날짜', '구분', 'Box번호', '위치', '파렛트']]):
-                    clear_cache_and_reload()
+                if insert_log(log_list):
                     st.success("완료!")
 
     with tab4:
-        up_pack = st.file_uploader("포장 파일", type=['xlsx'])
-        if up_pack and st.button("등록"):
+        st.subheader("📦 포장데이터(마스터) 등록")
+        up_pack = st.file_uploader("포장 파일 (.xlsx)", type=['xlsx'])
+        if up_pack:
             try:
+                # 1. 파일 읽기
                 raw = pd.read_excel(up_pack, dtype=str)
-                raw = raw.astype(str).apply(lambda x: x.str.strip())
-                grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
-                grp.columns = ['Box번호', '품목코드', '수량']
+                # 2. 컬럼명 공백 제거
+                raw.columns = raw.columns.str.strip()
+                # 3. 데이터 공백 제거
+                raw = raw.applymap(lambda x: x.strip() if isinstance(x, str) else x)
                 
-                dets = pd.DataFrame(columns=['Box번호', '품목코드', '규격', '압축코드'])
-                if '압축코드' in raw.columns:
-                    dets = raw[['카톤박스번호', '박스자재코드', '박스자재규격', '압축코드']].copy()
-                    dets.columns = ['Box번호', '품목코드', '규격', '압축코드']
+                # 4. 필수 컬럼 확인
+                req_cols = ['카톤박스번호', '박스자재코드', '박스자재명', '박스자재규격', '출고처명']
+                missing = [c for c in req_cols if c not in raw.columns]
+                
+                if missing:
+                    st.error(f"❌ 엑셀 파일에 다음 필수 항목이 없습니다: {missing}")
+                    st.warning("엑셀의 첫 번째 줄(제목)을 확인해주세요.")
+                    st.write("▼ 현재 인식된 엑셀 내용 (상위 5개)")
+                    st.dataframe(raw.head())
+                else:
+                    if st.button("DB 등록 시작"):
+                        grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
+                        grp.columns = ['Box번호', '품목코드', '수량']
+                        
+                        items = raw[['박스자재코드', '박스자재명', '박스자재규격', '출고처명']].drop_duplicates('박스자재코드')
+                        items.columns = ['품목코드', '품명', '규격', '공급업체']
+                        items['분류구분'] = ''
+                        items['바코드'] = ''
 
-                items = raw[['박스자재코드', '박스자재명', '박스자재규격', '출고처명']].drop_duplicates('박스자재코드')
-                items.columns = ['품목코드', '품명', '규격', '공급업체']
-                items['분류구분'] = ''
-                items['바코드'] = ''
+                        # 상세내역용 (옵션 컬럼 처리)
+                        dets_cols = ['카톤박스번호', '박스자재코드', '박스자재규격']
+                        if '압축코드' in raw.columns: dets_cols.append('압축코드')
+                        dets = raw[dets_cols].copy()
+                        dets.columns = ['Box번호', '품목코드', '규격', '압축코드'] if '압축코드' in raw.columns else ['Box번호', '품목코드', '규격']
+                        if '압축코드' not in dets.columns: dets['압축코드'] = ''
 
-                with st.spinner("등록 중..."):
-                    save_data('매핑정보', grp)
-                    save_data('상세내역', dets)
-                    save_data('품목표', items)
-                    clear_cache_and_reload()
-                    st.success("완료!")
-            except Exception as e: st.error(f"오류: {e}")
+                        with st.spinner("DB에 등록 중입니다..."):
+                            res1 = upsert_master_data('품목표', items, '품목코드')
+                            res2 = upsert_master_data('매핑정보', grp, 'Box번호')
+                            
+                            # 상세내역은 덮어쓰기 로직이 복잡하므로 일단 삭제 후 추가 방식 권장하나 여기선 insert
+                            if not dets.empty:
+                                supabase.table("상세내역").insert(dets.to_dict(orient='records')).execute()
+                            
+                            clear_cache()
+                            
+                            if res1 and res2:
+                                st.success(f"✅ 등록 완료! (품목 {len(items)}개, 매핑 {len(grp)}개)")
+                                st.info("이제 [1. 연속 스캔]이나 [2. 재고 현황] 탭에서 확인해보세요.")
+            except Exception as e:
+                st.error(f"처리 중 오류 발생: {e}")
 
     with tab5:
         st.dataframe(df_master)
