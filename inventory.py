@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.8.4)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.8.5)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -67,7 +67,6 @@ def load_data_from_db():
         data_l = fetch_all_data("입출고")
         df_l = pd.DataFrame(data_l)
         
-        # [수정] 상세내역도 불러오도록 변경 (다운로드를 위해)
         data_d = fetch_all_data("상세내역")
         df_d = pd.DataFrame(data_d) 
 
@@ -82,14 +81,15 @@ def load_data_from_db():
 def clear_cache():
     st.cache_data.clear()
 
-# --- [4] 재고 현황 계산 ---
+# --- [4] 재고 현황 계산 (압축코드 병합 추가) ---
 @st.cache_data(show_spinner=False)
-def calculate_stock_snapshot(df_log, df_mapping, df_master):
+def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     if df_log.empty: return pd.DataFrame(), pd.DataFrame()
 
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])].copy()
     
+    # 매칭 키 생성
     if not stock_boxes.empty:
         stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
     
@@ -101,12 +101,26 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master):
     if not df_master.empty and '품목코드' in df_master.columns:
         df_master['품목코드'] = df_master['품목코드'].astype(str).str.strip().str.upper()
 
+    # 상세내역(압축코드) 준비
+    if not df_details.empty:
+        df_details['match_key'] = df_details['box번호'].astype(str).str.strip().str.upper()
+        # 중복 제거 (박스 하나에 압축코드는 하나라고 가정하거나, 여러개면 첫번째꺼)
+        df_details_slim = df_details[['match_key', '압축코드']].drop_duplicates(subset=['match_key'])
+    else:
+        df_details_slim = pd.DataFrame(columns=['match_key', '압축코드'])
+
+    # 1. 매핑정보 병합
     merged = pd.merge(stock_boxes, df_mapping, on='match_key', how='left', suffixes=('', '_map'))
     merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
     merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
     
+    # 2. 품목 마스터 병합
     if not df_master.empty and '품목코드' in merged.columns:
         merged = pd.merge(merged, df_master, on='품목코드', how='left')
+
+    # 3. 상세내역(압축코드) 병합 [추가됨]
+    if not df_details_slim.empty:
+        merged = pd.merge(merged, df_details_slim, on='match_key', how='left')
     
     return stock_boxes, merged
 
@@ -246,25 +260,24 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         st.info("데이터 없음")
         return
 
-    stock_boxes, merged = calculate_stock_snapshot(df_log, df_mapping, df_master)
+    # [수정] df_details(상세내역)까지 넘겨서 병합
+    stock_boxes, merged = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
 
-    # [수정] 엑셀 다운로드 시 원하는 컬럼만 선택
-    req_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '공급업체', '수량']
-    # 실제 데이터에 있는 컬럼만 골라내기 (에러 방지)
+    # [수정] 다운로드 컬럼에 '압축코드' 추가
+    req_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '공급업체', '수량', '압축코드']
     final_cols = [c for c in req_cols if c in merged.columns]
     
     d1, d2, d3 = st.columns(3)
     with d1: 
-        # 정리된 컬럼으로 엑셀 생성
         st.download_button("📥 재고 요약 다운로드", to_excel(merged[final_cols]), "재고요약.xlsx", use_container_width=True)
     with d2: 
-        # 상세내역도 다운로드 (df_details 사용)
         st.download_button("📥 전체 상세 내역 다운로드", to_excel(df_details), "상세내역.xlsx", use_container_width=True)
     
     st.divider()
     
     sc1, sc2, sc3 = st.columns([1, 1, 2])
-    with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "box번호"])
+    # [수정] 검색 기준에 '압축코드' 추가
+    with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "box번호", "압축코드"])
     with sc2: exact_match = st.checkbox("정확히 일치")
     with sc3: search_query = st.text_input("검색어", key="sq")
 
@@ -278,7 +291,8 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
                 filtered_df['품목코드'].astype(str).str.contains(q, na=False) |
                 filtered_df['품명'].astype(str).str.contains(q, na=False) |
                 filtered_df['box번호'].astype(str).str.contains(q, na=False) |
-                filtered_df['규격'].astype(str).str.contains(q, na=False)
+                filtered_df['규격'].astype(str).str.contains(q, na=False) |
+                filtered_df['압축코드'].astype(str).str.contains(q, na=False) # 압축코드 검색 추가
             )
         else:
             if exact_match: mask = filtered_df[search_target] == q
@@ -290,13 +304,11 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
             if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
             elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
     
-    # 랙 클릭 처리
     if st.session_state.selected_rack and not filtered_df.empty:
         sel = st.session_state.selected_rack
         hl_list.append(sel)
         filtered_df = filtered_df[filtered_df['위치'].apply(lambda x: str(x).startswith(sel.split('-')[0]) and str(x).endswith(sel.split('-')[-1]) if '-' in str(x) else False)]
 
-    # 맵과 리스트 렌더링
     c_map, c_list = st.columns([1.5, 1])
     with c_map:
         st.markdown("##### 🗺️ 창고 배치도")
@@ -364,7 +376,9 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     with c_list:
         st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        # 화면 표시용 컬럼 정리
+        # [수정] 화면 표시 컬럼에 '압축코드' 추가
+        display_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '수량', '압축코드']
+        final_cols = [c for c in display_cols if c in filtered_df.columns]
         st.dataframe(filtered_df[final_cols], use_container_width=True, height=600)
 
 # --- 메인 ---
