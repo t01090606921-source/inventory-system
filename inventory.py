@@ -12,7 +12,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(Supabase)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.7.2)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.7.3)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -38,12 +38,13 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [3] 데이터 로드 ---
+# --- [3] 데이터 로드 (강력한 형변환 추가) ---
 @st.cache_data(ttl=60)
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
     try:
+        # 데이터 가져오기
         res_m = supabase.table("품목표").select("*").execute()
         df_m = pd.DataFrame(res_m.data)
         
@@ -56,7 +57,18 @@ def load_data_from_db():
         res_d = supabase.table("상세내역").select("*").execute()
         df_d = pd.DataFrame(res_d.data)
 
-        # DB에서 가져온 컬럼명을 화면 표시용으로 깔끔하게 정리 (소문자 이슈 등 방어)
+        # [핵심] 연결 고리가 되는 컬럼들을 무조건 문자열(str)로 변환하고 공백 제거 (매칭 오류 해결)
+        if not df_m.empty and '품목코드' in df_m.columns:
+            df_m['품목코드'] = df_m['품목코드'].astype(str).str.strip()
+            
+        if not df_map.empty and 'box번호' in df_map.columns:
+            df_map['box번호'] = df_map['box번호'].astype(str).str.strip()
+        if not df_map.empty and '품목코드' in df_map.columns:
+            df_map['품목코드'] = df_map['품목코드'].astype(str).str.strip()
+            
+        if not df_l.empty and 'box번호' in df_l.columns:
+            df_l['box번호'] = df_l['box번호'].astype(str).str.strip()
+
         return df_m, df_map, df_l, df_d
     except Exception as e:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -64,17 +76,16 @@ def load_data_from_db():
 def clear_cache():
     st.cache_data.clear()
 
-# --- 데이터 저장 함수들 (컬럼명 소문자 처리 강화) ---
+# --- 데이터 저장 함수들 ---
 def insert_log(new_data_list):
     if not supabase: return False
     try:
         cleaned_list = []
         for item in new_data_list:
-            # DB 컬럼명(box번호)에 맞춰서 키값 변경
             cleaned_list.append({
                 "날짜": item.get("날짜"),
                 "구분": item.get("구분"),
-                "box번호": item.get("Box번호"), # 대문자 B -> 소문자 b
+                "box번호": str(item.get("Box번호")).strip(), # 저장할 때도 강제 문자 변환
                 "위치": item.get("위치", ""),
                 "파렛트": item.get("파렛트", "")
             })
@@ -82,14 +93,16 @@ def insert_log(new_data_list):
         clear_cache()
         return True
     except Exception as e:
-        st.error(f"❌ 입출고 저장 실패: {e}")
+        st.error(f"❌ 저장 실패: {e}")
         return False
 
 def upsert_master_data(table_name, df, key_col):
     if not supabase: return False
     if df.empty: return False
     try:
-        # NaN(빈값) 처리: JSON 변환 시 에러 방지
+        # 데이터프레임 전체를 문자열로 변환하여 업로드 (안전성 확보)
+        df = df.astype(str)
+        # NaN을 None으로 변환 (JSON 호환)
         df = df.where(pd.notnull(df), None)
         
         data = df.to_dict(orient='records')
@@ -199,13 +212,17 @@ def buffer_scan(df_master, df_mapping, df_log):
     
     if not scan_val: return
 
-    # DB 컬럼명(box번호) 주의
+    # [수정] DB 컬럼명(box번호) 주의
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
+    
+    # 1. 매핑 정보 확인
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         map_info = df_mapping[df_mapping['box번호'] == scan_val]
         if not map_info.empty:
             p_code = str(map_info.iloc[0]['품목코드']).strip()
             disp_qty = map_info.iloc[0]['수량']
+            
+            # 2. 마스터 정보 확인
             if not df_master.empty and '품목코드' in df_master.columns:
                 m_info = df_master[df_master['품목코드'] == p_code]
                 if not m_info.empty:
@@ -226,7 +243,7 @@ def buffer_scan(df_master, df_mapping, df_log):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     if mode == "조회(검색)":
-        msg_text = f"🔎 조회: {scan_val} / {disp_spec} / {disp_qty}개 / {current_db_loc}"
+        msg_text = f"🔎 조회: {scan_val} / {disp_name} / {disp_spec} / {disp_qty}"
         st.session_state.proc_msg = ("info", msg_text)
     else:
         if is_duplicate:
@@ -287,16 +304,20 @@ def main():
         if df_log.empty:
             st.info("데이터 없음")
         else:
-            # 재고 계산 (DB 컬럼명 box번호 사용)
+            # [재고 현황] 매칭 로직 (box번호 기준)
             last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
             stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])]
             
             merged = pd.DataFrame()
             if not stock_boxes.empty:
+                # 1. 매핑정보와 결합 (box번호 기준)
                 merged = pd.merge(stock_boxes, df_mapping, on='box번호', how='left')
                 merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
                 merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
-                merged = pd.merge(merged, df_master, on='품목코드', how='left')
+                
+                # 2. 품목마스터와 결합 (품목코드 기준)
+                if not df_master.empty:
+                    merged = pd.merge(merged, df_master, on='품목코드', how='left')
 
             d1, d2, d3 = st.columns(3)
             with d1: st.download_button("📥 재고 요약 다운로드", to_excel(merged), "재고요약.xlsx", use_container_width=True)
@@ -342,7 +363,10 @@ def main():
                 render_rack_map(stock_boxes, hl_list)
             with c_list:
                 st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-                st.dataframe(filtered_df, use_container_width=True, height=600)
+                # 화면 표시용 컬럼 정리
+                display_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '수량']
+                final_cols = [c for c in display_cols if c in filtered_df.columns]
+                st.dataframe(filtered_df[final_cols], use_container_width=True, height=600)
 
     with tab3:
         st.subheader("📤 입출고 내역 일괄 업로드")
@@ -367,14 +391,14 @@ def main():
                 # 데이터 공백 제거
                 raw = raw.applymap(lambda x: x.strip() if isinstance(x, str) else x)
                 
-                # [수정] DB 컬럼명에 맞춰 소문자로 변환 (Box번호 -> box번호)
+                # [수정] DB 컬럼명에 맞춰 소문자로 변환
                 grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
-                grp.columns = ['box번호', '품목코드', '수량'] # 대문자 B -> 소문자 b
+                grp.columns = ['box번호', '품목코드', '수량']
                 
                 dets = pd.DataFrame(columns=['box번호', '품목코드', '규격', '압축코드'])
                 if '압축코드' in raw.columns:
                     dets = raw[['카톤박스번호', '박스자재코드', '박스자재규격', '압축코드']].copy()
-                    dets.columns = ['box번호', '품목코드', '규격', '압축코드'] # 소문자
+                    dets.columns = ['box번호', '품목코드', '규격', '압축코드']
 
                 items = raw[['박스자재코드', '박스자재명', '박스자재규격', '출고처명']].drop_duplicates('박스자재코드')
                 items.columns = ['품목코드', '품명', '규격', '공급업체']
@@ -385,9 +409,9 @@ def main():
                     upsert_master_data('품목표', items, '품목코드')
                     upsert_master_data('매핑정보', grp, 'box번호')
                     
-                    # 상세내역 저장
-                    dets_clean = dets.where(pd.notnull(dets), None)
-                    supabase.table("상세내역").insert(dets_clean.to_dict(orient='records')).execute()
+                    if not dets.empty:
+                        dets_clean = dets.where(pd.notnull(dets), None)
+                        supabase.table("상세내역").insert(dets_clean.to_dict(orient='records')).execute()
                     
                     clear_cache()
                     st.success("완료!")
