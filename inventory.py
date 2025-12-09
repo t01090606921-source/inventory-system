@@ -12,8 +12,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리(통합스캔)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.8.6)")
+    st.set_page_config(page_title="재고관리(최종)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.8.7)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -67,7 +67,7 @@ def load_data_from_db():
         data_l = fetch_all_data("입출고")
         df_l = pd.DataFrame(data_l)
         
-        data_d = fetch_all_data("상세내역") # 압축코드 매칭을 위해 로드 필수
+        data_d = fetch_all_data("상세내역") 
         df_d = pd.DataFrame(data_d) 
 
         for df in [df_m, df_map, df_l, df_d]:
@@ -84,13 +84,17 @@ def clear_cache():
 # --- [4] 재고 현황 계산 ---
 @st.cache_data(show_spinner=False)
 def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
-    if df_log.empty: return pd.DataFrame(), pd.DataFrame()
+    if df_log.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+    # 1. 현재 재고 박스 추출 (입고/이동 상태인 최신 로그)
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])].copy()
     
-    if not stock_boxes.empty:
-        stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
+    if stock_boxes.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # 키 정제
+    stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
     
     if not df_mapping.empty:
         df_mapping['match_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
@@ -100,13 +104,7 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     if not df_master.empty and '품목코드' in df_master.columns:
         df_master['품목코드'] = df_master['품목코드'].astype(str).str.strip().str.upper()
 
-    # 상세내역(압축코드) 병합 준비
-    if not df_details.empty:
-        df_details['match_key'] = df_details['box번호'].astype(str).str.strip().str.upper()
-        df_details_slim = df_details[['match_key', '압축코드']].drop_duplicates(subset=['match_key'])
-    else:
-        df_details_slim = pd.DataFrame(columns=['match_key', '압축코드'])
-
+    # 2. 재고 요약(Merged) 생성
     merged = pd.merge(stock_boxes, df_mapping, on='match_key', how='left', suffixes=('', '_map'))
     merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
     merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
@@ -114,10 +112,24 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     if not df_master.empty and '품목코드' in merged.columns:
         merged = pd.merge(merged, df_master, on='품목코드', how='left')
 
-    if not df_details_slim.empty:
-        merged = pd.merge(merged, df_details_slim, on='match_key', how='left')
-    
-    return stock_boxes, merged
+    # [핵심 추가] 3. 상세내역 필터링 (현재 재고에 있는 박스만 남기기)
+    filtered_details = pd.DataFrame()
+    if not df_details.empty:
+        # 상세내역 키 생성
+        df_details['match_key'] = df_details['box번호'].astype(str).str.strip().str.upper()
+        # 현재 재고에 있는 match_key만 필터링
+        active_keys = stock_boxes['match_key'].unique()
+        filtered_details = df_details[df_details['match_key'].isin(active_keys)].copy()
+        
+        # (선택) 상세내역에도 현재 위치 정보 붙여주면 좋음
+        loc_info = stock_boxes[['match_key', '위치', '파렛트']]
+        filtered_details = pd.merge(filtered_details, loc_info, on='match_key', how='left')
+        
+        # 불필요한 키 컬럼 제거 및 정리
+        if 'match_key' in filtered_details.columns:
+            del filtered_details['match_key']
+            
+    return stock_boxes, merged, filtered_details
 
 # --- 데이터 업로드 ---
 def chunked_upsert(table_name, df, key_col, batch_size=1000):
@@ -199,55 +211,20 @@ def get_sample_file():
     sample_data = {'날짜': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],'구분': ['입고'],'Box번호': ['V2024...'],'위치': ['1-2-7'],'파렛트': ['P-01']}
     return to_excel(pd.DataFrame(sample_data))
 
-# --- [핵심 수정] 통합 스캔 로직 (압축코드 -> 박스번호 자동 변환) ---
 def buffer_scan(df_master, df_mapping, df_log, df_details):
     scan_val = str(st.session_state.scan_input).strip().upper()
     mode = st.session_state.work_mode
     curr_loc = str(st.session_state.get('curr_location', '')).strip()
     curr_pal = str(st.session_state.get('curr_palette', '')).strip()
-    
     if not scan_val: return
 
-    # 1. 타겟 박스번호 찾기 (박스번호 or 압축코드)
-    target_box_no = scan_val
-    is_compressed = False
-    
-    # 1-A. 매핑정보에 바로 있는지 확인 (박스번호인 경우)
-    box_exists = False
+    disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
-        if not df_mapping[df_mapping['temp_key'] == scan_val].empty:
-            box_exists = True
-            
-    # 1-B. 박스번호가 아니면 압축코드인지 확인
-    if not box_exists:
-        if not df_details.empty and '압축코드' in df_details.columns:
-            # 압축코드 컬럼 대문자 변환하여 비교
-            df_details['temp_code'] = df_details['압축코드'].astype(str).str.strip().str.upper()
-            matched_row = df_details[df_details['temp_code'] == scan_val]
-            
-            if not matched_row.empty:
-                # 압축코드와 매핑된 박스번호 가져오기
-                target_box_no = str(matched_row.iloc[0]['box번호']).strip().upper()
-                is_compressed = True
-            else:
-                # 둘 다 아니면 일단 입력값 그대로 진행 (신규 박스 등)
-                target_box_no = scan_val
-
-    # 2. 정보 조회 (찾아낸 target_box_no 기준)
-    disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
-    
-    if not df_mapping.empty and 'box번호' in df_mapping.columns:
-        # 위에서 만든 temp_key 재사용하거나 다시 생성
-        if 'temp_key' not in df_mapping.columns:
-            df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
-            
-        map_info = df_mapping[df_mapping['temp_key'] == target_box_no]
-        
+        map_info = df_mapping[df_mapping['temp_key'] == scan_val]
         if not map_info.empty:
             p_code = str(map_info.iloc[0]['품목코드']).strip()
             disp_qty = map_info.iloc[0]['수량']
-            
             if not df_master.empty and '품목코드' in df_master.columns:
                 df_master['temp_key'] = df_master['품목코드'].astype(str).str.strip().str.upper()
                 m_info = df_master[df_master['temp_key'] == p_code.upper()]
@@ -255,11 +232,10 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
                     disp_name = m_info.iloc[0]['품명']
                     disp_spec = m_info.iloc[0]['규격']
 
-    # 3. 현재 위치/상태 조회
     box_status, current_db_loc = "신규", "미지정"
     if not df_log.empty and 'box번호' in df_log.columns:
         df_log['temp_key'] = df_log['box번호'].astype(str).str.strip().str.upper()
-        my_logs = df_log[df_log['temp_key'] == target_box_no]
+        my_logs = df_log[df_log['temp_key'] == scan_val]
         if not my_logs.empty:
             last_log = my_logs.iloc[0]
             last_action = last_log['구분']
@@ -270,26 +246,18 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     is_duplicate = (mode == "입고" and "창고있음" in box_status)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 4. 메시지 및 처리
-    msg_prefix = "📦 압축코드 스캔 → " if is_compressed else ""
-    
     if mode == "조회(검색)":
-        msg_text = f"🔎 {msg_prefix}Box: {target_box_no} / {disp_name} / {disp_spec} / {disp_qty}개 / {current_db_loc}"
+        msg_text = f"🔎 조회: {scan_val} / {disp_name} / {disp_spec} / {disp_qty}"
         st.session_state.proc_msg = ("info", msg_text)
     else:
         if is_duplicate:
-            st.session_state.proc_msg = ("error", f"⛔ 이미 입고됨: {target_box_no}")
+            st.session_state.proc_msg = ("error", f"⛔ 이미 입고됨: {scan_val}")
         else:
             final_loc = curr_loc if curr_loc else "미지정"
             final_pal = curr_pal if curr_pal else "이름없음"
-            log_entry = {
-                '날짜': now_str, '구분': mode, 'Box번호': target_box_no, 
-                '품목코드': p_code, '규격': disp_spec, '수량': disp_qty, 
-                '위치': final_loc, '파렛트': final_pal
-            }
+            log_entry = {'날짜': now_str, '구분': mode, 'Box번호': scan_val, '품목코드': p_code, '규격': disp_spec, '수량': disp_qty, '위치': final_loc, '파렛트': final_pal}
             st.session_state.scan_buffer.append(log_entry)
-            st.session_state.proc_msg = ("success", f"✅ {msg_prefix}{mode}: {target_box_no}")
-
+            st.session_state.proc_msg = ("success", f"✅ {mode}: {scan_val}")
     st.session_state.scan_input = ""
 
 # --- [핵심] 재고 현황 탭 ---
@@ -299,7 +267,8 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         st.info("데이터 없음")
         return
 
-    stock_boxes, merged = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
+    # [수정] filtered_details(필터링된 상세내역) 받아오기
+    stock_boxes, merged, filtered_details = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
 
     req_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '공급업체', '수량', '압축코드']
     final_cols = [c for c in req_cols if c in merged.columns]
@@ -308,12 +277,12 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     with d1: 
         st.download_button("📥 재고 요약 다운로드", to_excel(merged[final_cols]), "재고요약.xlsx", use_container_width=True)
     with d2: 
-        st.download_button("📥 전체 상세 내역 다운로드", to_excel(df_details), "상세내역.xlsx", use_container_width=True)
+        # [수정] 전체 df_details 대신 재고가 있는 filtered_details 다운로드
+        st.download_button("📥 상세 내역 다운로드 (재고분)", to_excel(filtered_details), "상세내역_재고.xlsx", use_container_width=True)
     
     st.divider()
     
     sc1, sc2, sc3 = st.columns([1, 1, 2])
-    # [수정] 압축코드 검색 제거 (원상복구)
     with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "box번호"])
     with sc2: exact_match = st.checkbox("정확히 일치")
     with sc3: search_query = st.text_input("검색어", key="sq")
@@ -412,7 +381,6 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     with c_list:
         st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        # 화면 표시 컬럼에 압축코드 제거 (요청사항 반영)
         display_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '수량']
         final_cols = [c for c in display_cols if c in filtered_df.columns]
         st.dataframe(filtered_df[final_cols], use_container_width=True, height=600)
@@ -440,8 +408,7 @@ def main():
         with c1: st.radio("모드", ["입고", "재고이동", "출고", "조회(검색)"], horizontal=True, key="work_mode")
         with c2: st.text_input("적재 위치 (1-2-7)", key="curr_location")
         with c3: st.text_input("파렛트 이름", key="curr_palette")
-        # [수정] df_details 추가 전달
-        with c4: st.text_input("Box번호 또는 압축코드", key="scan_input", on_change=buffer_scan, args=(df_master, df_mapping, df_log, df_details))
+        with c4: st.text_input("Box 번호 스캔", key="scan_input", on_change=buffer_scan, args=(df_master, df_mapping, df_log, df_details))
 
         if st.session_state.scan_buffer:
             disp_df = pd.DataFrame(st.session_state.scan_buffer)
