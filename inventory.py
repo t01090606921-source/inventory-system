@@ -12,7 +12,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(Supabase)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.7.3)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.7.4)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -38,40 +38,56 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [3] 데이터 로드 (강력한 형변환 추가) ---
+# --- [3] 데이터 로드 (빈 데이터 방어 코드 추가) ---
 @st.cache_data(ttl=60)
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
+    # 빈 데이터프레임을 위한 컬럼 정의 (이게 없으면 KeyError 발생)
+    cols_m = ['품목코드', '품명', '규격', '분류구분', '공급업체', '바코드']
+    cols_map = ['box번호', '품목코드', '수량']
+    cols_l = ['날짜', '구분', 'box번호', '위치', '파렛트']
+    cols_d = ['box번호', '품목코드', '규격', '압축코드']
+
     try:
-        # 데이터 가져오기
+        # 1. 품목표
         res_m = supabase.table("품목표").select("*").execute()
         df_m = pd.DataFrame(res_m.data)
+        if df_m.empty: df_m = pd.DataFrame(columns=cols_m)
         
+        # 2. 매핑정보
         res_map = supabase.table("매핑정보").select("*").execute()
         df_map = pd.DataFrame(res_map.data)
+        if df_map.empty: df_map = pd.DataFrame(columns=cols_map)
         
+        # 3. 입출고
         res_l = supabase.table("입출고").select("*").order("id", desc=True).execute()
         df_l = pd.DataFrame(res_l.data)
+        if df_l.empty: df_l = pd.DataFrame(columns=cols_l)
         
+        # 4. 상세내역
         res_d = supabase.table("상세내역").select("*").execute()
         df_d = pd.DataFrame(res_d.data)
+        if df_d.empty: df_d = pd.DataFrame(columns=cols_d)
 
-        # [핵심] 연결 고리가 되는 컬럼들을 무조건 문자열(str)로 변환하고 공백 제거 (매칭 오류 해결)
-        if not df_m.empty and '품목코드' in df_m.columns:
-            df_m['품목코드'] = df_m['품목코드'].astype(str).str.strip()
-            
-        if not df_map.empty and 'box번호' in df_map.columns:
-            df_map['box번호'] = df_map['box번호'].astype(str).str.strip()
-        if not df_map.empty and '품목코드' in df_map.columns:
-            df_map['품목코드'] = df_map['품목코드'].astype(str).str.strip()
-            
-        if not df_l.empty and 'box번호' in df_l.columns:
-            df_l['box번호'] = df_l['box번호'].astype(str).str.strip()
+        # [중요] 컬럼명 소문자 강제 변환 (DB와 싱크 맞춤) 및 문자열 변환
+        for df in [df_m, df_map, df_l, df_d]:
+            df.columns = [c.lower() for c in df.columns] # 컬럼명 소문자화 ('Box번호' -> 'box번호')
+            # 내용 문자열 변환
+            for col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
+
+        # 수량은 숫자로 다시 변환
+        if '수량' in df_map.columns:
+            df_map['수량'] = pd.to_numeric(df_map['수량'], errors='coerce').fillna(0).astype(int)
 
         return df_m, df_map, df_l, df_d
     except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        # 에러 발생 시 빈 껍데기라도 반환해서 멈춤 방지
+        return (pd.DataFrame(columns=cols_m), 
+                pd.DataFrame(columns=cols_map), 
+                pd.DataFrame(columns=cols_l), 
+                pd.DataFrame(columns=cols_d))
 
 def clear_cache():
     st.cache_data.clear()
@@ -85,7 +101,7 @@ def insert_log(new_data_list):
             cleaned_list.append({
                 "날짜": item.get("날짜"),
                 "구분": item.get("구분"),
-                "box번호": str(item.get("Box번호")).strip(), # 저장할 때도 강제 문자 변환
+                "box번호": str(item.get("Box번호")).strip(), # 저장할 때 소문자 키 사용
                 "위치": item.get("위치", ""),
                 "파렛트": item.get("파렛트", "")
             })
@@ -100,9 +116,9 @@ def upsert_master_data(table_name, df, key_col):
     if not supabase: return False
     if df.empty: return False
     try:
-        # 데이터프레임 전체를 문자열로 변환하여 업로드 (안전성 확보)
+        # 데이터프레임 전체를 문자열로 변환
         df = df.astype(str)
-        # NaN을 None으로 변환 (JSON 호환)
+        # NaN을 None으로 변환
         df = df.where(pd.notnull(df), None)
         
         data = df.to_dict(orient='records')
@@ -212,10 +228,9 @@ def buffer_scan(df_master, df_mapping, df_log):
     
     if not scan_val: return
 
-    # [수정] DB 컬럼명(box번호) 주의
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
     
-    # 1. 매핑 정보 확인
+    # 1. 매핑 정보 확인 (컬럼명 소문자 box번호 사용)
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         map_info = df_mapping[df_mapping['box번호'] == scan_val]
         if not map_info.empty:
@@ -304,19 +319,19 @@ def main():
         if df_log.empty:
             st.info("데이터 없음")
         else:
-            # [재고 현황] 매칭 로직 (box번호 기준)
+            # box번호 기준으로 병합 (컬럼명 소문자 주의)
             last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
             stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])]
             
             merged = pd.DataFrame()
             if not stock_boxes.empty:
-                # 1. 매핑정보와 결합 (box번호 기준)
+                # 매핑정보와 결합
                 merged = pd.merge(stock_boxes, df_mapping, on='box번호', how='left')
                 merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
                 merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
                 
-                # 2. 품목마스터와 결합 (품목코드 기준)
-                if not df_master.empty:
+                # 품목마스터와 결합 (품목코드가 있어야 함)
+                if not df_master.empty and '품목코드' in merged.columns:
                     merged = pd.merge(merged, df_master, on='품목코드', how='left')
 
             d1, d2, d3 = st.columns(3)
@@ -388,10 +403,9 @@ def main():
         if up_pack and st.button("등록"):
             try:
                 raw = pd.read_excel(up_pack, dtype=str)
-                # 데이터 공백 제거
                 raw = raw.applymap(lambda x: x.strip() if isinstance(x, str) else x)
                 
-                # [수정] DB 컬럼명에 맞춰 소문자로 변환
+                # DB 컬럼명에 맞춰 소문자로 변환
                 grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
                 grp.columns = ['box번호', '품목코드', '수량']
                 
@@ -414,7 +428,7 @@ def main():
                         supabase.table("상세내역").insert(dets_clean.to_dict(orient='records')).execute()
                     
                     clear_cache()
-                    st.success("완료!")
+                    st.success("✅ 등록 완료!")
             except Exception as e: st.error(f"오류: {e}")
 
     with tab5:
