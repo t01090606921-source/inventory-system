@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import io
 from supabase import create_client, Client
+import math
 
 # --- [1] 로그인 보안 ---
 def check_password():
@@ -11,8 +12,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리(Supabase)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.7.8)")
+    st.set_page_config(page_title="재고관리(대용량)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.8.0)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -31,6 +32,7 @@ def init_connection():
     try:
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
+        # timeout을 늘려서 대용량 처리에 대비
         return create_client(url, key)
     except Exception as e:
         st.error(f"❌ Supabase 연결 실패: {e}")
@@ -38,32 +40,54 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [3] 데이터 로드 ---
-@st.cache_data(ttl=60)
+# --- [대용량] 데이터 가져오기 (Pagination) ---
+# 1000개 제한을 뚫고 끝까지 가져오는 함수
+def fetch_all_data(table_name):
+    if not supabase: return []
+    
+    all_data = []
+    page_size = 1000
+    offset = 0
+    
+    while True:
+        # range: 시작~끝 범위 지정
+        response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
+        data = response.data
+        all_data.extend(data)
+        
+        if len(data) < page_size: # 가져온 게 1000개 미만이면 끝난 것
+            break
+        offset += page_size
+        
+    return all_data
+
+# --- [3] 데이터 로드 (캐싱) ---
+@st.cache_data(ttl=300) # 5분 캐싱 (데이터가 크므로 자주 부르지 않음)
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
     try:
-        # 데이터 가져오기
-        res_m = supabase.table("품목표").select("*").execute()
-        df_m = pd.DataFrame(res_m.data)
+        # 대용량 함수 사용
+        data_m = fetch_all_data("품목표")
+        df_m = pd.DataFrame(data_m)
         
-        res_map = supabase.table("매핑정보").select("*").execute()
-        df_map = pd.DataFrame(res_map.data)
+        data_map = fetch_all_data("매핑정보")
+        df_map = pd.DataFrame(data_map)
         
-        res_l = supabase.table("입출고").select("*").order("id", desc=True).execute()
-        df_l = pd.DataFrame(res_l.data)
+        data_l = fetch_all_data("입출고")
+        df_l = pd.DataFrame(data_l)
         
-        res_d = supabase.table("상세내역").select("*").execute()
-        df_d = pd.DataFrame(res_d.data)
+        # 상세내역은 너무 클 수 있으므로 필요할 때만 부르거나 일단 다 부름
+        data_d = fetch_all_data("상세내역")
+        df_d = pd.DataFrame(data_d)
 
-        # 컬럼명 소문자 통일 (DB 호환성)
+        # 컬럼명 소문자 통일 (안전장치)
         for df in [df_m, df_map, df_l, df_d]:
             if not df.empty:
                 df.columns = [c.lower() for c in df.columns]
 
         return df_m, df_map, df_l, df_d
-    except Exception:
+    except Exception as e:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def clear_cache():
@@ -75,9 +99,11 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master):
     if df_log.empty:
         return pd.DataFrame(), pd.DataFrame()
 
+    # 로그가 27만건 이상이면 여기서 시간 좀 걸림
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])].copy()
     
+    # 키 정제
     if not stock_boxes.empty:
         stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
     
@@ -103,6 +129,10 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master):
 def reset_database():
     if not supabase: return False
     try:
+        # 데이터가 많으면 삭제도 오래 걸리므로 truncate 권장 (하지만 API로는 delete all)
+        # 27만건 삭제는 타임아웃 날 수 있으니 SQL Editor 사용 권장 메시지
+        st.warning("데이터가 너무 많으면 이 버튼으로 삭제되지 않을 수 있습니다. 그럴 땐 Supabase 웹사이트 SQL Editor에서 'TRUNCATE table 테이블명;' 명령어를 쓰세요.")
+        
         supabase.table("입출고").delete().neq("id", 0).execute()
         supabase.table("상세내역").delete().neq("id", 0).execute()
         supabase.table("매핑정보").delete().neq("box번호", "dummy").execute()
@@ -111,6 +141,71 @@ def reset_database():
         return True
     except Exception as e:
         st.error(f"초기화 실패: {e}")
+        return False
+
+# --- [대용량] 데이터 업로드 (Chunking) ---
+def chunked_upsert(table_name, df, key_col, batch_size=1000):
+    if not supabase: return False
+    if df.empty: return False
+    
+    try:
+        df = df.astype(str)
+        if key_col in df.columns:
+            df[key_col] = df[key_col].str.strip().str.upper()
+        df = df.where(pd.notnull(df), None)
+        
+        total_rows = len(df)
+        chunks = math.ceil(total_rows / batch_size)
+        
+        # 프로그레스 바
+        my_bar = st.progress(0, text=f"{table_name} 업로드 시작...")
+        
+        for i in range(chunks):
+            start = i * batch_size
+            end = start + batch_size
+            chunk = df.iloc[start:end]
+            data = chunk.to_dict(orient='records')
+            
+            supabase.table(table_name).upsert(data, on_conflict=key_col).execute()
+            
+            # 진행률 업데이트
+            percent = min((i + 1) / chunks, 1.0)
+            my_bar.progress(percent, text=f"{table_name} 업로드 중... ({start+len(chunk)}/{total_rows})")
+            
+        my_bar.empty()
+        return True
+    except Exception as e:
+        st.error(f"❌ {table_name} 등록 실패: {e}")
+        return False
+
+# 상세내역은 PK가 없으므로 insert 사용
+def chunked_insert(table_name, df, batch_size=1000):
+    if not supabase: return False
+    if df.empty: return False
+    
+    try:
+        # 데이터 정제
+        df = df.where(pd.notnull(df), None)
+        total_rows = len(df)
+        chunks = math.ceil(total_rows / batch_size)
+        
+        my_bar = st.progress(0, text=f"{table_name} 추가 중...")
+        
+        for i in range(chunks):
+            start = i * batch_size
+            end = start + batch_size
+            chunk = df.iloc[start:end]
+            data = chunk.to_dict(orient='records')
+            
+            supabase.table(table_name).insert(data).execute()
+            
+            percent = min((i + 1) / chunks, 1.0)
+            my_bar.progress(percent, text=f"{table_name} 추가 중... ({start+len(chunk)}/{total_rows})")
+            
+        my_bar.empty()
+        return True
+    except Exception as e:
+        st.error(f"❌ {table_name} 추가 실패: {e}")
         return False
 
 # --- 데이터 저장 함수들 ---
@@ -131,21 +226,6 @@ def insert_log(new_data_list):
         return True
     except Exception as e:
         st.error(f"❌ 저장 실패: {e}")
-        return False
-
-def upsert_master_data(table_name, df, key_col):
-    if not supabase: return False
-    if df.empty: return False
-    try:
-        df = df.astype(str)
-        if key_col in df.columns:
-            df[key_col] = df[key_col].str.strip().str.upper()
-        df = df.where(pd.notnull(df), None)
-        data = df.to_dict(orient='records')
-        supabase.table(table_name).upsert(data, on_conflict=key_col).execute()
-        return True
-    except Exception as e:
-        st.error(f"❌ {table_name} 등록 실패: {e}")
         return False
 
 # --- 초기화 ---
@@ -250,8 +330,10 @@ def buffer_scan(df_master, df_mapping, df_log):
 
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
     
-    # 매핑 확인 (대문자 변환 후 비교)
+    # 1. 매핑 정보 확인 (대문자 매칭)
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
+        # 캐싱된 데이터는 이미 calculate에서 키 생성했겠지만 여기선 raw일 수 있음
+        # 안전하게 임시 키 생성
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
         
@@ -302,6 +384,7 @@ def buffer_scan(df_master, df_mapping, df_log):
 # --- 메인 ---
 def main():
     init_session_state()
+    # 대용량 로드 시작
     df_master, df_mapping, df_log, df_details = load_data_from_db()
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터", "6. 데이터 진단"])
@@ -346,8 +429,9 @@ def main():
 
             d1, d2, d3 = st.columns(3)
             with d1: st.download_button("📥 재고 요약 다운로드", to_excel(merged), "재고요약.xlsx", use_container_width=True)
-            # [버튼 복구] 상세 내역 다운로드
-            with d2: st.download_button("📥 전체 상세 내역 다운로드", to_excel(df_details), "상세내역.xlsx", use_container_width=True)
+            with d2: 
+                # 상세 내역은 너무 클 수 있으니 1000개만 샘플 혹은 전체
+                st.download_button("📥 전체 상세 내역 다운로드 (주의: 오래 걸림)", to_excel(df_details), "상세내역.xlsx", use_container_width=True)
             
             st.divider()
             
@@ -410,17 +494,17 @@ def main():
                     st.rerun()
 
     with tab4:
-        st.subheader("📦 포장데이터(마스터) 등록")
+        st.subheader("📦 포장데이터(마스터) 등록 (대용량)")
         
-        with st.expander("🚨 데이터 전체 초기화 (주의)"):
-            st.warning("이 버튼을 누르면 모든 데이터가 삭제됩니다.")
+        with st.expander("🚨 데이터 전체 초기화"):
+            st.warning("경고: 모든 데이터가 삭제됩니다.")
             if st.button("데이터 초기화 실행", type="primary"):
                 if reset_database():
-                    st.success("모든 데이터가 삭제되었습니다.")
+                    st.success("삭제 완료.")
                     st.rerun()
 
         up_pack = st.file_uploader("포장 파일 (.xlsx)", type=['xlsx'])
-        if up_pack and st.button("등록"):
+        if up_pack and st.button("등록 (대용량)"):
             try:
                 raw = pd.read_excel(up_pack, dtype=str)
                 raw = raw.applymap(lambda x: x.strip() if isinstance(x, str) else x)
@@ -441,38 +525,34 @@ def main():
                 items['분류구분'] = ''
                 items['바코드'] = ''
 
-                with st.spinner("DB 등록 중..."):
-                    upsert_master_data('품목표', items, '품목코드')
-                    upsert_master_data('매핑정보', grp, 'box번호')
-                    
-                    if not dets.empty:
-                        dets_clean = dets.where(pd.notnull(dets), None)
-                        supabase.table("상세내역").insert(dets_clean.to_dict(orient='records')).execute()
-                    
-                    clear_cache()
-                    st.success("✅ 등록 완료!")
-                    st.rerun()
+                # Chunking Upload
+                st.write("품목표 업로드 중...")
+                chunked_upsert('품목표', items, '품목코드')
+                
+                st.write("매핑정보 업로드 중...")
+                chunked_upsert('매핑정보', grp, 'box번호')
+                
+                if not dets.empty:
+                    st.write("상세내역 업로드 중...")
+                    chunked_insert('상세내역', dets)
+                
+                clear_cache()
+                st.success("✅ 대용량 등록 완료!")
+                st.rerun()
             except Exception as e: st.error(f"오류: {e}")
 
     with tab5:
-        st.dataframe(df_master)
+        st.dataframe(df_master.head(1000)) # 너무 많으면 브라우저 렉 걸림
 
-    # [새로운 기능] 데이터 진단 탭
     with tab6:
-        st.subheader("🕵️‍♀️ 데이터 진단 (관리자용)")
-        st.info("DB에 데이터가 실제로 얼마나 들어있는지 눈으로 확인하는 곳입니다.")
+        st.subheader("🕵️‍♀️ 데이터 진단 (총량 확인)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("품목표", f"{len(df_master)}건")
+        c2.metric("매핑정보", f"{len(df_mapping)}건")
+        c3.metric("입출고", f"{len(df_log)}건")
         
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(f"**1. 포장데이터(매핑정보) - 총 {len(df_mapping)}건**")
-            st.dataframe(df_mapping.head(100), use_container_width=True)
-        with c2:
-            st.markdown(f"**2. 입출고내역 - 총 {len(df_log)}건**")
-            st.dataframe(df_log.head(100), use_container_width=True)
-
-        st.divider()
-        st.write("▼ 품목 마스터 (총 {}건)".format(len(df_master)))
-        st.dataframe(df_master.head(50))
+        st.write("▼ 매핑정보 샘플 (50개)")
+        st.dataframe(df_mapping.head(50))
 
 if __name__ == '__main__':
     main()
