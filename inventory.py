@@ -12,7 +12,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(Supabase)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.7.1 - 진단모드)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.7.1)") # 제목 확인!
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -33,7 +33,8 @@ def init_connection():
         key = st.secrets["supabase"]["key"]
         return create_client(url, key)
     except Exception as e:
-        st.error(f"❌ Supabase 연결 실패: {e}")
+        st.error(f"❌ Supabase 연결 설정 오류: {e}")
+        st.info("Secrets에 [supabase] url과 key가 올바르게 설정되었는지 확인해주세요.")
         return None
 
 supabase = init_connection()
@@ -44,7 +45,7 @@ def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
     try:
-        # 데이터 가져오기 (데이터가 없으면 빈 리스트 반환됨)
+        # 데이터 가져오기
         res_m = supabase.table("품목표").select("*").execute()
         df_m = pd.DataFrame(res_m.data)
         
@@ -59,8 +60,7 @@ def load_data_from_db():
 
         return df_m, df_map, df_l, df_d
     except Exception as e:
-        # 테이블이 아직 없을 수도 있음
-        st.error(f"⚠️ 데이터 불러오기 오류: {e}")
+        # 테이블이 없거나 데이터가 없을 때
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def clear_cache():
@@ -83,14 +83,12 @@ def insert_log(new_data_list):
         clear_cache()
         return True
     except Exception as e:
-        st.error(f"❌ 입출고 저장 실패: {e}")
+        st.error(f"❌ 저장 실패: {e}")
         return False
 
 def upsert_master_data(table_name, df, key_col):
     if not supabase: return False
-    if df.empty:
-        st.warning(f"⚠️ {table_name}에 등록할 데이터가 없습니다.")
-        return False
+    if df.empty: return False
     try:
         data = df.to_dict(orient='records')
         supabase.table(table_name).upsert(data, on_conflict=key_col).execute()
@@ -246,6 +244,8 @@ def buffer_scan(df_master, df_mapping, df_log):
 # --- 메인 ---
 def main():
     init_session_state()
+    
+    # 데이터 로드 (Supabase)
     df_master, df_mapping, df_log, df_details = load_data_from_db()
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터"])
@@ -322,6 +322,7 @@ def main():
                     if exact_match: mask = filtered_df[search_target] == q
                     else: mask = filtered_df[search_target].astype(str).str.contains(q, na=False)
                 filtered_df = filtered_df[mask]
+                
                 for loc in filtered_df['위치'].unique():
                     parts = str(loc).split('-')
                     if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
@@ -357,56 +358,45 @@ def main():
     with tab4:
         st.subheader("📦 포장데이터(마스터) 등록")
         up_pack = st.file_uploader("포장 파일 (.xlsx)", type=['xlsx'])
-        if up_pack:
+        if up_pack and st.button("등록"):
             try:
-                # 1. 파일 읽기
                 raw = pd.read_excel(up_pack, dtype=str)
-                # 2. 컬럼명 공백 제거
-                raw.columns = raw.columns.str.strip()
-                # 3. 데이터 공백 제거
                 raw = raw.applymap(lambda x: x.strip() if isinstance(x, str) else x)
                 
-                # 4. 필수 컬럼 확인
+                # 필수 컬럼 체크
                 req_cols = ['카톤박스번호', '박스자재코드', '박스자재명', '박스자재규격', '출고처명']
                 missing = [c for c in req_cols if c not in raw.columns]
                 
                 if missing:
-                    st.error(f"❌ 엑셀 파일에 다음 필수 항목이 없습니다: {missing}")
-                    st.warning("엑셀의 첫 번째 줄(제목)을 확인해주세요.")
-                    st.write("▼ 현재 인식된 엑셀 내용 (상위 5개)")
-                    st.dataframe(raw.head())
+                    st.error(f"❌ 엑셀 파일 필수 항목 누락: {missing}")
+                    st.write("현재 파일 컬럼:", list(raw.columns))
                 else:
-                    if st.button("DB 등록 시작"):
-                        grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
-                        grp.columns = ['Box번호', '품목코드', '수량']
+                    grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
+                    grp.columns = ['Box번호', '품목코드', '수량']
+                    
+                    dets = pd.DataFrame(columns=['Box번호', '품목코드', '규격', '압축코드'])
+                    if '압축코드' in raw.columns:
+                        dets = raw[['카톤박스번호', '박스자재코드', '박스자재규격', '압축코드']].copy()
+                        dets.columns = ['Box번호', '품목코드', '규격', '압축코드']
+
+                    items = raw[['박스자재코드', '박스자재명', '박스자재규격', '출고처명']].drop_duplicates('박스자재코드')
+                    items.columns = ['품목코드', '품명', '규격', '공급업체']
+                    items['분류구분'] = ''
+                    items['바코드'] = ''
+
+                    with st.spinner("DB 등록 중..."):
+                        res1 = upsert_master_data('품목표', items, '품목코드')
+                        res2 = upsert_master_data('매핑정보', grp, 'Box번호')
                         
-                        items = raw[['박스자재코드', '박스자재명', '박스자재규격', '출고처명']].drop_duplicates('박스자재코드')
-                        items.columns = ['품목코드', '품명', '규격', '공급업체']
-                        items['분류구분'] = ''
-                        items['바코드'] = ''
-
-                        # 상세내역용 (옵션 컬럼 처리)
-                        dets_cols = ['카톤박스번호', '박스자재코드', '박스자재규격']
-                        if '압축코드' in raw.columns: dets_cols.append('압축코드')
-                        dets = raw[dets_cols].copy()
-                        dets.columns = ['Box번호', '품목코드', '규격', '압축코드'] if '압축코드' in raw.columns else ['Box번호', '품목코드', '규격']
-                        if '압축코드' not in dets.columns: dets['압축코드'] = ''
-
-                        with st.spinner("DB에 등록 중입니다..."):
-                            res1 = upsert_master_data('품목표', items, '품목코드')
-                            res2 = upsert_master_data('매핑정보', grp, 'Box번호')
-                            
-                            # 상세내역은 덮어쓰기 로직이 복잡하므로 일단 삭제 후 추가 방식 권장하나 여기선 insert
-                            if not dets.empty:
-                                supabase.table("상세내역").insert(dets.to_dict(orient='records')).execute()
-                            
-                            clear_cache()
-                            
-                            if res1 and res2:
-                                st.success(f"✅ 등록 완료! (품목 {len(items)}개, 매핑 {len(grp)}개)")
-                                st.info("이제 [1. 연속 스캔]이나 [2. 재고 현황] 탭에서 확인해보세요.")
+                        if not dets.empty:
+                            # 상세내역은 단순 추가
+                            supabase.table("상세내역").insert(dets.to_dict(orient='records')).execute()
+                        
+                        clear_cache()
+                        if res1 and res2:
+                            st.success("✅ 등록 완료!")
             except Exception as e:
-                st.error(f"처리 중 오류 발생: {e}")
+                st.error(f"오류: {e}")
 
     with tab5:
         st.dataframe(df_master)
