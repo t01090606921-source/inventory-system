@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.8.3)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.8.4)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -67,9 +67,11 @@ def load_data_from_db():
         data_l = fetch_all_data("입출고")
         df_l = pd.DataFrame(data_l)
         
-        df_d = pd.DataFrame() 
+        # [수정] 상세내역도 불러오도록 변경 (다운로드를 위해)
+        data_d = fetch_all_data("상세내역")
+        df_d = pd.DataFrame(data_d) 
 
-        for df in [df_m, df_map, df_l]:
+        for df in [df_m, df_map, df_l, df_d]:
             if not df.empty:
                 df.columns = [c.lower() for c in df.columns]
 
@@ -237,7 +239,7 @@ def buffer_scan(df_master, df_mapping, df_log):
             st.session_state.proc_msg = ("success", f"✅ {mode}: {scan_val}")
     st.session_state.scan_input = ""
 
-# --- [핵심] 재고 현황 탭 (경고 수정) ---
+# --- [핵심] 재고 현황 탭 ---
 @st.fragment
 def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     if df_log.empty:
@@ -246,9 +248,18 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     stock_boxes, merged = calculate_stock_snapshot(df_log, df_mapping, df_master)
 
+    # [수정] 엑셀 다운로드 시 원하는 컬럼만 선택
+    req_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '공급업체', '수량']
+    # 실제 데이터에 있는 컬럼만 골라내기 (에러 방지)
+    final_cols = [c for c in req_cols if c in merged.columns]
+    
     d1, d2, d3 = st.columns(3)
-    with d1: st.download_button("📥 재고 요약 다운로드", to_excel(merged), "재고요약.xlsx", use_container_width=True)
-    with d2: st.download_button("📥 전체 상세 내역 다운로드", to_excel(df_details), "상세내역.xlsx", use_container_width=True)
+    with d1: 
+        # 정리된 컬럼으로 엑셀 생성
+        st.download_button("📥 재고 요약 다운로드", to_excel(merged[final_cols]), "재고요약.xlsx", use_container_width=True)
+    with d2: 
+        # 상세내역도 다운로드 (df_details 사용)
+        st.download_button("📥 전체 상세 내역 다운로드", to_excel(df_details), "상세내역.xlsx", use_container_width=True)
     
     st.divider()
     
@@ -285,6 +296,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         hl_list.append(sel)
         filtered_df = filtered_df[filtered_df['위치'].apply(lambda x: str(x).startswith(sel.split('-')[0]) and str(x).endswith(sel.split('-')[-1]) if '-' in str(x) else False)]
 
+    # 맵과 리스트 렌더링
     c_map, c_list = st.columns([1.5, 1])
     with c_map:
         st.markdown("##### 🗺️ 창고 배치도")
@@ -310,10 +322,8 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         </style>
         """, unsafe_allow_html=True)
 
-        # [수정] 콜백에서 st.rerun() 제거 (경고 해결)
         def rack_click(key):
             st.session_state.selected_rack = key
-            # st.rerun() 삭제함 (프래그먼트가 알아서 갱신됨)
 
         cl, cm, cr = st.columns([3.5, 0.1, 0.8])
         with cl:
@@ -354,8 +364,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     with c_list:
         st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        display_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '수량']
-        final_cols = [c for c in display_cols if c in filtered_df.columns]
+        # 화면 표시용 컬럼 정리
         st.dataframe(filtered_df[final_cols], use_container_width=True, height=600)
 
 # --- 메인 ---
@@ -418,13 +427,12 @@ def main():
     with tab4:
         st.subheader("📦 포장데이터(마스터) 등록 (대용량)")
         
-        # [데이터 초기화 - 비밀번호 보호 기능 추가하면 좋음]
         with st.expander("🚨 데이터 전체 초기화 (주의)"):
             st.warning("이 버튼을 누르면 모든 데이터가 삭제됩니다.")
             if st.button("데이터 초기화 실행", type="primary"):
-                # Supabase delete logic here (needs implementation in reset_database)
-                # For safety, let's just show a warning for now or implement if needed
-                st.info("안전을 위해 초기화는 SQL Editor에서 직접 수행하는 것을 권장합니다.") 
+                if reset_database():
+                    st.success("모든 데이터가 삭제되었습니다.")
+                    st.rerun()
 
         up_pack = st.file_uploader("포장 파일 (.xlsx)", type=['xlsx'])
         if up_pack and st.button("등록 (대용량)"):
