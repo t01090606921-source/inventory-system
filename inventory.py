@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.9.4)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.9.5)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -271,7 +271,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             st.session_state.proc_msg = ("success", f"✅ {msg_prefix}{mode}: {target_box_no}")
     st.session_state.scan_input = ""
 
-# --- [핵심] 재고 현황 탭 (통로 기능 추가) ---
+# --- [핵심] 재고 현황 탭 ---
 @st.fragment
 def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     if df_log.empty:
@@ -280,7 +280,8 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     stock_boxes, merged, filtered_details = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
 
-    req_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '공급업체', '수량', '압축코드']
+    # [수정] 엑셀 다운로드 컬럼 순서 (요청사항 반영)
+    req_cols = ['날짜', '위치', '파렛트', 'box번호', '품목코드', '규격', '공급업체', '수량']
     final_cols = [c for c in req_cols if c in merged.columns]
     
     d1, d2, d3 = st.columns(3)
@@ -323,26 +324,23 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         filtered_df = filtered_df[mask]
         
         for loc in filtered_df['위치'].unique():
-            # [수정] 통로 검색 지원
             clean_loc = str(loc).strip()
             if '-' in clean_loc and '통로' not in clean_loc:
                 parts = clean_loc.split('-')
                 if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
                 elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
             else:
-                # "1~2 통로" 같은 건 그대로 추가
                 hl_list.append(clean_loc)
     
-    # 랙 클릭 필터링
     if st.session_state.selected_rack and not filtered_df.empty:
         sel = st.session_state.selected_rack
         hl_list.append(sel)
         
         def filter_loc(l):
             l = str(l).strip()
-            if '통로' in sel: # 통로 클릭 시 정확히 일치하는 것만
+            if '통로' in sel:
                 return l == sel
-            else: # 일반 랙 클릭 시 기존 로직
+            else:
                 if '-' in l and '통로' not in l:
                     return l.startswith(sel.split('-')[0]) and l.endswith(sel.split('-')[-1])
                 return False
@@ -357,7 +355,6 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
             locs = stock_boxes['위치'].astype(str).str.strip()
             for raw_loc in locs:
                 if not raw_loc or raw_loc == '미지정': continue
-                # [수정] 통로 재고 카운트 로직
                 if '통로' in raw_loc:
                     rack_summary[raw_loc] = rack_summary.get(raw_loc, 0) + 1
                 else:
@@ -381,19 +378,16 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         def rack_click(key):
             st.session_state.selected_rack = key
 
-        # [수정] 통로 버튼 렌더링 헬퍼
         def aisle_btn(name):
             qty = rack_summary.get(name, 0)
             label = f"{name}\n({qty})" if qty > 0 else name
             is_hl = (name in hl_list)
             st.button(label, key=f"btn_{name}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(name,), use_container_width=True)
 
-        # [수정] 왼쪽 랙 + 통로 배치
-        # c_left: 3.5, c_mid: 0.1, c_right: 1.2 (넓힘)
+        # [수정] 7번 통로 세로 배치 구현
         cl, cm, cr = st.columns([3.5, 0.1, 1.2]) 
         
         with cl:
-            # Helper for rack row
             def rack_row(r_num):
                 cols = st.columns(7)
                 for c_idx, col in enumerate(cols):
@@ -404,24 +398,19 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
                     col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
 
             rack_row(6)
-            aisle_btn("5~6 통로") # 6과 5 사이
+            aisle_btn("5~6 통로")
             rack_row(5)
-            
             st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            
             rack_row(4)
-            aisle_btn("3~4 통로") # 4와 3 사이
+            aisle_btn("3~4 통로")
             rack_row(3)
-            
             st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            
             rack_row(2)
-            aisle_btn("1~2 통로") # 2와 1 사이
+            aisle_btn("1~2 통로")
             rack_row(1)
 
         with cr:
             st.markdown('<div class="rack7-label">Rack 7 & Aisle</div>', unsafe_allow_html=True)
-            # Rack 7과 7번 통로를 좌우로 배치
             c_r7, c_a7 = st.columns([1, 1])
             
             with c_r7:
@@ -430,15 +419,27 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
                     qty = rack_summary.get(rack_key, 0)
                     label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
                     is_hl = (rack_key in hl_list)
-                    st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
+                    st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
             
             with c_a7:
-                # 7번 통로 버튼 (크게 하나)
-                aisle_btn("7번 통로")
+                # [수정] 7번 통로를 3개의 버튼으로 세로 배치 (시각적 효과)
+                # 어느 버튼을 눌러도 "7번 통로"로 인식
+                aisle_name = "7번 통로"
+                qty = rack_summary.get(aisle_name, 0)
+                is_hl = (aisle_name in hl_list)
+                label_txt = f"{aisle_name}\n({qty})" if qty > 0 else aisle_name
+                
+                # 3개의 긴 버튼을 연속 배치하여 '세로 통로'처럼 보이게 함
+                st.button(label_txt, key="btn_7a_1", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
+                st.button(label_txt, key="btn_7a_2", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
+                st.button(label_txt, key="btn_7a_3", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
+                st.button(label_txt, key="btn_7a_4", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
 
     with c_list:
         st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
+        # [수정] 요청하신 컬럼 순서 반영 (날짜/위치/파렛트/box번호/품목코드/규격/공급업체/수량)
+        user_order = ['날짜', '위치', '파렛트', 'box번호', '품목코드', '규격', '공급업체', '수량']
+        final_cols_disp = [c for c in user_order if c in filtered_df.columns]
         st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
 
 # --- 메인 ---
