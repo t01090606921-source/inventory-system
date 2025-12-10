@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.9.5)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.9.6)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -280,7 +280,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     stock_boxes, merged, filtered_details = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
 
-    # [수정] 엑셀 다운로드 컬럼 순서 (요청사항 반영)
+    # 요청하신 컬럼 순서 (날짜 / 위치 / 파렛트 / box번호 / 품목코드 / 규격 / 공급업체 / 수량)
     req_cols = ['날짜', '위치', '파렛트', 'box번호', '품목코드', '규격', '공급업체', '수량']
     final_cols = [c for c in req_cols if c in merged.columns]
     
@@ -384,7 +384,6 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
             is_hl = (name in hl_list)
             st.button(label, key=f"btn_{name}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(name,), use_container_width=True)
 
-        # [수정] 7번 통로 세로 배치 구현
         cl, cm, cr = st.columns([3.5, 0.1, 1.2]) 
         
         with cl:
@@ -422,24 +421,13 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
                     st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
             
             with c_a7:
-                # [수정] 7번 통로를 3개의 버튼으로 세로 배치 (시각적 효과)
-                # 어느 버튼을 눌러도 "7번 통로"로 인식
-                aisle_name = "7번 통로"
-                qty = rack_summary.get(aisle_name, 0)
-                is_hl = (aisle_name in hl_list)
-                label_txt = f"{aisle_name}\n({qty})" if qty > 0 else aisle_name
-                
-                # 3개의 긴 버튼을 연속 배치하여 '세로 통로'처럼 보이게 함
-                st.button(label_txt, key="btn_7a_1", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
-                st.button(label_txt, key="btn_7a_2", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
-                st.button(label_txt, key="btn_7a_3", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
-                st.button(label_txt, key="btn_7a_4", type="primary" if is_hl else "secondary", on_click=rack_click, args=(aisle_name,), use_container_width=True)
+                # [수정] 7번 통로를 다시 하나의 버튼으로 통합 (사용자 요청)
+                aisle_btn("7번 통로")
 
     with c_list:
         st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        # [수정] 요청하신 컬럼 순서 반영 (날짜/위치/파렛트/box번호/품목코드/규격/공급업체/수량)
-        user_order = ['날짜', '위치', '파렛트', 'box번호', '품목코드', '규격', '공급업체', '수량']
-        final_cols_disp = [c for c in user_order if c in filtered_df.columns]
+        # 수정된 컬럼 순서로 리스트 출력
+        final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
         st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
 
 # --- 메인 ---
