@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.9.2)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.9.3)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -46,14 +46,11 @@ def fetch_all_data(table_name):
     page_size = 1000
     offset = 0
     while True:
-        try:
-            response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
-            data = response.data
-            all_data.extend(data)
-            if len(data) < page_size: break
-            offset += page_size
-        except Exception:
-            break
+        response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
+        data = response.data
+        all_data.extend(data)
+        if len(data) < page_size: break
+        offset += page_size
     return all_data
 
 # --- [3] 데이터 로드 (캐싱) ---
@@ -123,7 +120,7 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
             
     return stock_boxes, merged, filtered_details
 
-# --- 데이터 업로드 (청킹) ---
+# --- 데이터 업로드 ---
 def chunked_upsert(table_name, df, key_col, batch_size=1000):
     if not supabase: return False
     if df.empty: return False
@@ -144,7 +141,7 @@ def chunked_upsert(table_name, df, key_col, batch_size=1000):
         my_bar.empty()
         return True
     except Exception as e:
-        st.error(f"❌ {table_name} 실패: {e}")
+        st.error(f"실패: {e}")
         return False
 
 def chunked_insert(table_name, df, batch_size=1000):
@@ -154,7 +151,7 @@ def chunked_insert(table_name, df, batch_size=1000):
         df = df.where(pd.notnull(df), None)
         total_rows = len(df)
         chunks = math.ceil(total_rows / batch_size)
-        my_bar = st.progress(0, text=f"{table_name} 추가 중...")
+        my_bar = st.progress(0, text=f"{table_name} 추가...")
         for i in range(chunks):
             start = i * batch_size
             end = start + batch_size
@@ -165,7 +162,7 @@ def chunked_insert(table_name, df, batch_size=1000):
         my_bar.empty()
         return True
     except Exception as e:
-        st.error(f"❌ {table_name} 실패: {e}")
+        st.error(f"실패: {e}")
         return False
 
 def insert_log(new_data_list):
@@ -274,6 +271,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             st.session_state.proc_msg = ("success", f"✅ {msg_prefix}{mode}: {target_box_no}")
     st.session_state.scan_input = ""
 
+# --- [핵심] 재고 현황 탭 ---
 @st.fragment
 def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     if df_log.empty:
@@ -295,7 +293,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     
     sc1, sc2, sc3 = st.columns([1, 1, 2])
     with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "box번호"])
-    with sc2: exact_match = st.checkbox("정확히 일치")
+    with sc2: exact_match = st.checkbox("정확히 일치", value=True) # [수정] 기본값 True
     with sc3: search_query = st.text_input("검색어", key="sq")
 
     filtered_df = merged
@@ -303,21 +301,33 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     if search_query and not filtered_df.empty:
         q = search_query.strip().upper()
+        
+        # [수정] 전체 검색 시에도 정확히 일치 옵션 적용
         if search_target == "전체":
-            mask = (
-                filtered_df['품목코드'].astype(str).str.contains(q, na=False) |
-                filtered_df['품명'].astype(str).str.contains(q, na=False) |
-                filtered_df['box번호'].astype(str).str.contains(q, na=False) |
-                filtered_df['규격'].astype(str).str.contains(q, na=False)
-            )
+            if exact_match:
+                mask = (
+                    (filtered_df['품목코드'] == q) |
+                    (filtered_df['품명'] == q) |
+                    (filtered_df['box번호'] == q) |
+                    (filtered_df['규격'] == q)
+                )
+            else:
+                mask = (
+                    filtered_df['품목코드'].astype(str).str.contains(q, na=False) |
+                    filtered_df['품명'].astype(str).str.contains(q, na=False) |
+                    filtered_df['box번호'].astype(str).str.contains(q, na=False) |
+                    filtered_df['규격'].astype(str).str.contains(q, na=False)
+                )
         else:
             if exact_match: mask = filtered_df[search_target] == q
             else: mask = filtered_df[search_target].astype(str).str.contains(q, na=False)
         
         filtered_df = filtered_df[mask]
+        
+        # [수정] 검색 결과가 있을 때만 hl_list 생성
         for loc in filtered_df['위치'].unique():
             parts = str(loc).split('-')
-            if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
+            if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}") # Rack-Level 매핑 (3-1-7 -> 3-7)
             elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
     
     if st.session_state.selected_rack and not filtered_df.empty:
@@ -334,7 +344,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
             for raw_loc in locs:
                 if not raw_loc or raw_loc == '미지정': continue
                 parts = raw_loc.split('-')
-                if len(parts) >= 3: k = f"{parts[0]}-{parts[2]}"
+                if len(parts) >= 3: k = f"{parts[0]}-{parts[2]}" # Rack-Level (e.g. 3-1-7 -> 3-7)
                 elif len(parts) == 2: k = f"{parts[0]}-{parts[1]}"
                 else: k = raw_loc
                 rack_summary[k] = rack_summary.get(k, 0) + 1
@@ -392,8 +402,9 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     with c_list:
         st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
-        st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
+        display_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '수량']
+        final_cols = [c for c in display_cols if c in filtered_df.columns]
+        st.dataframe(filtered_df[final_cols], use_container_width=True, height=600)
 
 # --- 메인 ---
 def main():
@@ -444,12 +455,10 @@ def main():
         if up and st.button("DB 업로드 (대용량 대응)"):
             try:
                 df = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
+                clean_df = pd.DataFrame()
+                clean_df['날짜'] = df['날짜'].astype(str).replace('nan', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                clean_df['구분'] = df['구분'].astype(str)
                 
-                # [수정] 업로드 전처리 강화 (헤더 정리 및 매핑)
-                # 1. 컬럼명 공백 제거
-                df.columns = df.columns.str.strip().str.replace(' ', '') 
-                
-                # 2. 필수 컬럼 매핑 확인 ('Box번호', 'box번호', 'BoxNo' 등 대응)
                 col_map = {}
                 for c in df.columns:
                     if 'box' in c.lower() or '박스' in c: col_map[c] = 'box번호'
@@ -461,18 +470,13 @@ def main():
                 df.rename(columns=col_map, inplace=True)
 
                 if 'box번호' not in df.columns:
-                    st.error(f"❌ 'Box번호' 컬럼을 찾을 수 없습니다. (발견된 컬럼: {list(df.columns)})")
+                    st.error("❌ 'Box번호' 컬럼을 찾을 수 없습니다.")
                     st.stop()
 
-                # 3. 데이터 정제
-                clean_df = pd.DataFrame()
-                clean_df['날짜'] = df['날짜'].astype(str).replace('nan', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                clean_df['구분'] = df['구분'].astype(str)
-                clean_df['box번호'] = df['box번호'].astype(str).str.strip().str.upper() # 대문자 강제
+                clean_df['box번호'] = df['box번호'].astype(str).str.strip().str.upper()
                 clean_df['위치'] = df['위치'].astype(str).replace('nan', '') if '위치' in df.columns else ''
                 clean_df['파렛트'] = df['파렛트'].astype(str).replace('nan', '') if '파렛트' in df.columns else ''
 
-                # 4. 업로드 시작
                 if chunked_insert('입출고', clean_df):
                     st.success(f"✅ 총 {len(clean_df)}건 업로드 완료!")
                     clear_cache()
@@ -482,13 +486,18 @@ def main():
 
     with tab4:
         st.subheader("📦 포장데이터(마스터) 등록 (대용량)")
-        
         with st.expander("🚨 데이터 전체 초기화 (주의)"):
             st.warning("이 버튼을 누르면 모든 데이터가 삭제됩니다.")
             if st.button("데이터 초기화 실행", type="primary"):
-                if reset_database():
-                    st.success("모든 데이터가 삭제되었습니다.")
-                    st.rerun()
+                # Supabase delete (SQL Truncate is safer if possible via editor)
+                # Here we try delete all via API
+                supabase.table("입출고").delete().neq("id", 0).execute()
+                supabase.table("상세내역").delete().neq("id", 0).execute()
+                supabase.table("매핑정보").delete().neq("box번호", "dummy").execute()
+                supabase.table("품목표").delete().neq("품목코드", "dummy").execute()
+                clear_cache()
+                st.success("모든 데이터가 삭제되었습니다.")
+                st.rerun()
 
         up_pack = st.file_uploader("포장 파일 (.xlsx)", type=['xlsx'])
         if up_pack and st.button("등록 (대용량)"):
@@ -536,7 +545,6 @@ def main():
         c1.metric("품목표", f"{len(df_master)}건")
         c2.metric("매핑정보", f"{len(df_mapping)}건")
         c3.metric("입출고", f"{len(df_log)}건")
-        
         st.write("▼ 매핑정보 샘플")
         st.dataframe(df_mapping.head(50))
 
