@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.9.3)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.9.4)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -271,7 +271,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             st.session_state.proc_msg = ("success", f"✅ {msg_prefix}{mode}: {target_box_no}")
     st.session_state.scan_input = ""
 
-# --- [핵심] 재고 현황 탭 ---
+# --- [핵심] 재고 현황 탭 (통로 기능 추가) ---
 @st.fragment
 def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     if df_log.empty:
@@ -293,7 +293,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
     
     sc1, sc2, sc3 = st.columns([1, 1, 2])
     with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "box번호"])
-    with sc2: exact_match = st.checkbox("정확히 일치", value=True) # [수정] 기본값 True
+    with sc2: exact_match = st.checkbox("정확히 일치", value=True)
     with sc3: search_query = st.text_input("검색어", key="sq")
 
     filtered_df = merged
@@ -301,8 +301,6 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
 
     if search_query and not filtered_df.empty:
         q = search_query.strip().upper()
-        
-        # [수정] 전체 검색 시에도 정확히 일치 옵션 적용
         if search_target == "전체":
             if exact_match:
                 mask = (
@@ -324,16 +322,32 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         
         filtered_df = filtered_df[mask]
         
-        # [수정] 검색 결과가 있을 때만 hl_list 생성
         for loc in filtered_df['위치'].unique():
-            parts = str(loc).split('-')
-            if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}") # Rack-Level 매핑 (3-1-7 -> 3-7)
-            elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
+            # [수정] 통로 검색 지원
+            clean_loc = str(loc).strip()
+            if '-' in clean_loc and '통로' not in clean_loc:
+                parts = clean_loc.split('-')
+                if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
+                elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
+            else:
+                # "1~2 통로" 같은 건 그대로 추가
+                hl_list.append(clean_loc)
     
+    # 랙 클릭 필터링
     if st.session_state.selected_rack and not filtered_df.empty:
         sel = st.session_state.selected_rack
         hl_list.append(sel)
-        filtered_df = filtered_df[filtered_df['위치'].apply(lambda x: str(x).startswith(sel.split('-')[0]) and str(x).endswith(sel.split('-')[-1]) if '-' in str(x) else False)]
+        
+        def filter_loc(l):
+            l = str(l).strip()
+            if '통로' in sel: # 통로 클릭 시 정확히 일치하는 것만
+                return l == sel
+            else: # 일반 랙 클릭 시 기존 로직
+                if '-' in l and '통로' not in l:
+                    return l.startswith(sel.split('-')[0]) and l.endswith(sel.split('-')[-1])
+                return False
+
+        filtered_df = filtered_df[filtered_df['위치'].apply(filter_loc)]
 
     c_map, c_list = st.columns([1.5, 1])
     with c_map:
@@ -343,11 +357,15 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
             locs = stock_boxes['위치'].astype(str).str.strip()
             for raw_loc in locs:
                 if not raw_loc or raw_loc == '미지정': continue
-                parts = raw_loc.split('-')
-                if len(parts) >= 3: k = f"{parts[0]}-{parts[2]}" # Rack-Level (e.g. 3-1-7 -> 3-7)
-                elif len(parts) == 2: k = f"{parts[0]}-{parts[1]}"
-                else: k = raw_loc
-                rack_summary[k] = rack_summary.get(k, 0) + 1
+                # [수정] 통로 재고 카운트 로직
+                if '통로' in raw_loc:
+                    rack_summary[raw_loc] = rack_summary.get(raw_loc, 0) + 1
+                else:
+                    parts = raw_loc.split('-')
+                    if len(parts) >= 3: k = f"{parts[0]}-{parts[2]}"
+                    elif len(parts) == 2: k = f"{parts[0]}-{parts[1]}"
+                    else: k = raw_loc
+                    rack_summary[k] = rack_summary.get(k, 0) + 1
 
         st.markdown("""
         <style>
@@ -355,7 +373,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         div[data-testid="column"] button:hover { border-color: #333 !important; transform: scale(1.05); z-index: 5; }
         button[kind="primary"] { background-color: #ffcdd2 !important; color: #b71c1c !important; border: 2px solid #d32f2f !important; }
         button[kind="secondary"] { background-color: #ffffff !important; color: #555 !important; }
-        .rack-spacer { height: 30px; width: 100%; }
+        .rack-spacer { height: 10px; width: 100%; } 
         .rack7-label { text-align: center; font-weight: bold; color: #555; margin-bottom: 5px; font-size: 12px; }
         </style>
         """, unsafe_allow_html=True)
@@ -363,18 +381,20 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         def rack_click(key):
             st.session_state.selected_rack = key
 
-        cl, cm, cr = st.columns([3.5, 0.1, 0.8])
+        # [수정] 통로 버튼 렌더링 헬퍼
+        def aisle_btn(name):
+            qty = rack_summary.get(name, 0)
+            label = f"{name}\n({qty})" if qty > 0 else name
+            is_hl = (name in hl_list)
+            st.button(label, key=f"btn_{name}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(name,), use_container_width=True)
+
+        # [수정] 왼쪽 랙 + 통로 배치
+        # c_left: 3.5, c_mid: 0.1, c_right: 1.2 (넓힘)
+        cl, cm, cr = st.columns([3.5, 0.1, 1.2]) 
+        
         with cl:
-            for r_num in [6]:
-                cols = st.columns(7)
-                for c_idx, col in enumerate(cols):
-                    rack_key = f"6-{c_idx+1}"
-                    qty = rack_summary.get(rack_key, 0)
-                    label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                    is_hl = (rack_key in hl_list)
-                    col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
-            st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            for r_num in [5, 4]:
+            # Helper for rack row
+            def rack_row(r_num):
                 cols = st.columns(7)
                 for c_idx, col in enumerate(cols):
                     rack_key = f"{r_num}-{c_idx+1}"
@@ -382,29 +402,44 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
                     label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
                     is_hl = (rack_key in hl_list)
                     col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
+
+            rack_row(6)
+            aisle_btn("5~6 통로") # 6과 5 사이
+            rack_row(5)
+            
             st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            for r_num in [3, 2, 1]:
-                cols = st.columns(7)
-                for c_idx, col in enumerate(cols):
-                    rack_key = f"{r_num}-{c_idx+1}"
-                    qty = rack_summary.get(rack_key, 0)
-                    label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                    is_hl = (rack_key in hl_list)
-                    col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
+            
+            rack_row(4)
+            aisle_btn("3~4 통로") # 4와 3 사이
+            rack_row(3)
+            
+            st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
+            
+            rack_row(2)
+            aisle_btn("1~2 통로") # 2와 1 사이
+            rack_row(1)
+
         with cr:
-            st.markdown('<div class="rack7-label">Rack 7</div>', unsafe_allow_html=True)
-            for i in range(12, 0, -1):
-                rack_key = f"7-{i}"
-                qty = rack_summary.get(rack_key, 0)
-                label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                is_hl = (rack_key in hl_list)
-                st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
+            st.markdown('<div class="rack7-label">Rack 7 & Aisle</div>', unsafe_allow_html=True)
+            # Rack 7과 7번 통로를 좌우로 배치
+            c_r7, c_a7 = st.columns([1, 1])
+            
+            with c_r7:
+                for i in range(12, 0, -1):
+                    rack_key = f"7-{i}"
+                    qty = rack_summary.get(rack_key, 0)
+                    label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
+                    is_hl = (rack_key in hl_list)
+                    st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
+            
+            with c_a7:
+                # 7번 통로 버튼 (크게 하나)
+                aisle_btn("7번 통로")
 
     with c_list:
         st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        display_cols = ['날짜', '구분', 'box번호', '위치', '파렛트', '품목코드', '품명', '규격', '수량']
-        final_cols = [c for c in display_cols if c in filtered_df.columns]
-        st.dataframe(filtered_df[final_cols], use_container_width=True, height=600)
+        final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
+        st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
 
 # --- 메인 ---
 def main():
@@ -486,18 +521,13 @@ def main():
 
     with tab4:
         st.subheader("📦 포장데이터(마스터) 등록 (대용량)")
+        
         with st.expander("🚨 데이터 전체 초기화 (주의)"):
             st.warning("이 버튼을 누르면 모든 데이터가 삭제됩니다.")
             if st.button("데이터 초기화 실행", type="primary"):
-                # Supabase delete (SQL Truncate is safer if possible via editor)
-                # Here we try delete all via API
-                supabase.table("입출고").delete().neq("id", 0).execute()
-                supabase.table("상세내역").delete().neq("id", 0).execute()
-                supabase.table("매핑정보").delete().neq("box번호", "dummy").execute()
-                supabase.table("품목표").delete().neq("품목코드", "dummy").execute()
-                clear_cache()
-                st.success("모든 데이터가 삭제되었습니다.")
-                st.rerun()
+                if reset_database():
+                    st.success("모든 데이터가 삭제되었습니다.")
+                    st.rerun()
 
         up_pack = st.file_uploader("포장 파일 (.xlsx)", type=['xlsx'])
         if up_pack and st.button("등록 (대용량)"):
@@ -545,6 +575,7 @@ def main():
         c1.metric("품목표", f"{len(df_master)}건")
         c2.metric("매핑정보", f"{len(df_mapping)}건")
         c3.metric("입출고", f"{len(df_log)}건")
+        
         st.write("▼ 매핑정보 샘플")
         st.dataframe(df_mapping.head(50))
 
