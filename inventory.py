@@ -13,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.10.2)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.10.3)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -39,21 +39,28 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [대용량] 데이터 가져오기 ---
+# --- [대용량] 데이터 가져오기 (무제한 로드 수정) ---
 def fetch_all_data(table_name):
     if not supabase: return []
     all_data = []
-    page_size = 2000
+    page_size = 1000
     offset = 0
+    
     while True:
-        try:
-            response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
-            data = response.data
-            all_data.extend(data)
-            if len(data) < page_size: break
-            offset += page_size
-        except Exception:
+        # [수정] try-except 제거하여 에러 발생 시 중단되지 않고 원인 파악 가능하게 함
+        # 데이터가 많으면 시간이 좀 걸릴 수 있음
+        response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
+        data = response.data
+        
+        if not data:
             break
+            
+        all_data.extend(data)
+        
+        if len(data) < page_size: 
+            break
+        offset += page_size
+        
     return all_data
 
 # --- [3] 데이터 로드 (캐싱) ---
@@ -61,6 +68,7 @@ def fetch_all_data(table_name):
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
+        # 모든 테이블에 대해 대용량 가져오기 함수 적용
         data_m = fetch_all_data("품목표")
         df_m = pd.DataFrame(data_m)
         
@@ -78,7 +86,8 @@ def load_data_from_db():
                 df.columns = [c.lower() for c in df.columns]
 
         return df_m, df_map, df_l, df_d
-    except Exception:
+    except Exception as e:
+        st.error(f"데이터 로드 중 오류 발생: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def clear_cache():
@@ -204,7 +213,6 @@ def get_sample_file():
     sample_data = {'날짜': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],'이동구분': ['입고'],'입고구분': ['일반철거'],'Box번호': ['V2024...'],'위치': ['1-2-7'],'파렛트': ['P-01']}
     return to_excel(pd.DataFrame(sample_data))
 
-# --- [스마트 스캔] Box번호/압축코드 자동 인식 + 출고 검증 ---
 def buffer_scan(df_master, df_mapping, df_log, df_details):
     scan_val = str(st.session_state.scan_input).strip().upper()
     mode = st.session_state.work_mode
@@ -212,30 +220,10 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     curr_pal = str(st.session_state.get('curr_palette', '')).strip()
     if not scan_val: return
 
-    # 1. 타겟 박스번호 찾기
-    target_box_no = scan_val
-    is_compressed = False
-    
-    box_exists = False
-    if not df_mapping.empty and 'box번호' in df_mapping.columns:
-        df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
-        if not df_mapping[df_mapping['temp_key'] == scan_val].empty:
-            box_exists = True
-            
-    if not box_exists:
-        if not df_details.empty and '압축코드' in df_details.columns:
-            df_details['temp_code'] = df_details['압축코드'].astype(str).str.strip().str.upper()
-            matched_row = df_details[df_details['temp_code'] == scan_val]
-            if not matched_row.empty:
-                target_box_no = str(matched_row.iloc[0]['box번호']).strip().upper()
-                is_compressed = True
-
-    # 2. 정보 조회
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
-        if 'temp_key' not in df_mapping.columns:
-            df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
-        map_info = df_mapping[df_mapping['temp_key'] == target_box_no]
+        df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
+        map_info = df_mapping[df_mapping['temp_key'] == scan_val]
         if not map_info.empty:
             p_code = str(map_info.iloc[0]['품목코드']).strip()
             disp_qty = map_info.iloc[0]['수량']
@@ -246,7 +234,27 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
                     disp_name = m_info.iloc[0]['품명']
                     disp_spec = m_info.iloc[0]['규격']
 
-    # 3. 상태 조회
+    is_compressed = False
+    target_box_no = scan_val
+    if p_code == "정보없음":
+        if not df_details.empty and '압축코드' in df_details.columns:
+            df_details['temp_code'] = df_details['압축코드'].astype(str).str.strip().str.upper()
+            matched = df_details[df_details['temp_code'] == scan_val]
+            if not matched.empty:
+                target_box_no = str(matched.iloc[0]['box번호']).strip().upper()
+                is_compressed = True
+                if not df_mapping.empty:
+                    df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
+                    map_info = df_mapping[df_mapping['temp_key'] == target_box_no]
+                    if not map_info.empty:
+                        p_code = str(map_info.iloc[0]['품목코드']).strip()
+                        disp_qty = map_info.iloc[0]['수량']
+                        if not df_master.empty:
+                            m_info = df_master[df_master['temp_key'] == p_code.upper()]
+                            if not m_info.empty:
+                                disp_name = m_info.iloc[0]['품명']
+                                disp_spec = m_info.iloc[0]['규격']
+
     box_status, current_db_loc = "신규", "미지정"
     if not df_log.empty and 'box번호' in df_log.columns:
         df_log['temp_key'] = df_log['box번호'].astype(str).str.strip().str.upper()
@@ -265,14 +273,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     if mode == "조회(검색)":
         msg_text = f"🔎 {msg_prefix}Box: {target_box_no} / {disp_name} / {disp_spec} / {disp_qty}개 / {current_db_loc}"
         st.session_state.proc_msg = ("info", msg_text)
-    elif mode == "출고":
-        if "창고있음" not in box_status:
-            st.session_state.proc_msg = ("error", f"⛔ 출고 불가: Box [{target_box_no}] 재고 없음")
-        else:
-            log_entry = {'날짜': now_str, '구분': mode, '입고구분': '', 'Box번호': target_box_no, '품목코드': p_code, '규격': disp_spec, '수량': disp_qty, '위치': final_loc, '파렛트': final_pal}
-            st.session_state.scan_buffer.append(log_entry)
-            st.session_state.proc_msg = ("success", f"✅ {msg_prefix}출고 대기: {target_box_no}")
-    else: # 입고, 이동
+    else:
         if is_duplicate:
             st.session_state.proc_msg = ("error", f"⛔ 이미 입고됨: {target_box_no}")
         else:
@@ -281,7 +282,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             log_entry = {'날짜': now_str, '구분': mode, '입고구분': '', 'Box번호': target_box_no, '품목코드': p_code, '규격': disp_spec, '수량': disp_qty, '위치': final_loc, '파렛트': final_pal}
             st.session_state.scan_buffer.append(log_entry)
             st.session_state.proc_msg = ("success", f"✅ {msg_prefix}{mode}: {target_box_no}")
-            
     st.session_state.scan_input = ""
 
 @st.fragment
@@ -472,46 +472,36 @@ def main():
                 df = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
                 clean_df = pd.DataFrame()
                 
-                # [핵심 수정] 컬럼 매핑 로직 강화 (충돌 방지)
-                # 1. 컬럼명 정제
+                # [수정] 컬럼 매핑 강화 (충돌 방지)
                 df.columns = df.columns.str.strip().str.replace(' ', '')
-                
-                # 2. 필수 컬럼 유연하게 찾기
                 col_box = next((c for c in df.columns if 'box' in c.lower() or '박스' in c), None)
                 if not col_box:
                     st.error("❌ 'Box번호' 컬럼이 없습니다.")
                     st.stop()
                 
-                # 3. 구분 컬럼 찾기 ('이동구분' 우선, 없으면 '구분' 사용 / '입고구분'과 혼동 방지)
                 col_gubun = next((c for c in df.columns if ('이동구분' in c) or ('구분' in c and '입고' not in c)), None)
-                if not col_gubun:
-                    st.error("❌ '이동구분'(또는 '구분') 컬럼이 없습니다.")
-                    st.stop()
-                    
                 col_in_type = next((c for c in df.columns if '입고구분' in c), None)
                 col_loc = next((c for c in df.columns if '위치' in c), None)
                 col_pal = next((c for c in df.columns if '파렛트' in c or '팔레트' in c), None)
                 col_date = next((c for c in df.columns if '날짜' in c), None)
 
-                # 4. 데이터프레임 조립 (컬럼명 변경 대신 새로 생성)
                 if col_date: clean_df['날짜'] = df[col_date].astype(str).replace('nan', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 else: clean_df['날짜'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
-                clean_df['구분'] = df[col_gubun].astype(str)
+                clean_df['구분'] = df[col_gubun].astype(str) if col_gubun else '입고'
                 clean_df['입고구분'] = df[col_in_type].astype(str).replace('nan', '') if col_in_type else ''
                 clean_df['box번호'] = df[col_box].astype(str).str.strip().str.upper()
                 clean_df['위치'] = df[col_loc].astype(str).replace('nan', '') if col_loc else ''
                 clean_df['파렛트'] = df[col_pal].astype(str).replace('nan', '') if col_pal else ''
 
-                # [검증] 일괄 업로드 시 출고 재고 확인
+                # 출고 검증
                 current_stock, _, _ = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
                 available_boxes = set(current_stock['match_key'].values) if not current_stock.empty else set()
-                
                 outbound_check = clean_df[clean_df['구분'] == '출고']
                 missing_boxes = [b for b in outbound_check['box번호'] if b not in available_boxes]
                 
                 if missing_boxes:
-                    st.error(f"⛔ 업로드 불가: 다음 박스들은 현재 재고에 없어 출고할 수 없습니다.\n{missing_boxes[:10]} ... (총 {len(missing_boxes)}건)")
+                    st.error(f"⛔ 업로드 불가: 다음 박스들은 현재 재고에 없어 출고할 수 없습니다.\n{missing_boxes[:10]} ...")
                     st.stop()
 
                 if chunked_insert('입출고', clean_df):
