@@ -48,6 +48,7 @@ def fetch_all_data(table_name, sort_col):
     offset = 0
     while True:
         try:
+            # 정렬 기준(sort_col)을 적용하여 데이터 누락 방지
             response = supabase.table(table_name).select("*").order(sort_col).range(offset, offset + page_size - 1).execute()
             data = response.data
             if not data: break
@@ -55,6 +56,7 @@ def fetch_all_data(table_name, sort_col):
             if len(data) < page_size: break
             offset += page_size
         except Exception:
+            # 에러 발생 시 멈추지 않고 현재까지 데이터 반환
             break
     return all_data
 
@@ -63,12 +65,16 @@ def fetch_all_data(table_name, sort_col):
 def load_heavy_data():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
+        # 각 테이블에 맞는 정렬 키 지정 (KeyError 방지 핵심)
         data_m = fetch_all_data("품목표", "품목코드")
         df_m = pd.DataFrame(data_m)
+        
         data_map = fetch_all_data("매핑정보", "box번호")
         df_map = pd.DataFrame(data_map)
+        
         data_d = fetch_all_data("상세내역", "box번호")
         df_d = pd.DataFrame(data_d) 
+
         for df in [df_m, df_map, df_d]:
             if not df.empty: df.columns = [c.lower() for c in df.columns]
         return df_m, df_map, df_d
@@ -88,9 +94,10 @@ def load_light_data():
 def clear_cache_all():
     st.cache_data.clear()
 
-# --- [4] 재고 현황 계산 ---
+# --- [4] 재고 현황 계산 (KeyError 방어 로직) ---
 @st.cache_data(show_spinner=False)
 def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
+    # 로그가 없으면 빈 값 반환
     if df_log.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
@@ -98,16 +105,18 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     
     if stock_boxes.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
-    # 매핑정보 안전장치
+    # 매핑정보 안전장치: 데이터가 없어도 컬럼은 생성
     if df_mapping.empty: 
         df_mapping = pd.DataFrame(columns=['match_key', 'box번호', '품목코드', '수량'])
     else:
         if 'box번호' in df_mapping.columns: 
             df_mapping['match_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         else: 
-            df_mapping['match_key'] = ""
+            df_mapping['match_key'] = "" # 컬럼이 없으면 빈 값으로라도 생성
 
     stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
+    
+    # 병합
     merged = pd.merge(stock_boxes, df_mapping, on='match_key', how='left', suffixes=('', '_map'))
     merged['위치'] = merged['위치'].fillna('미지정')
     merged['파렛트'] = merged['파렛트'].fillna('이름없음')
@@ -198,7 +207,6 @@ def add_schedule(title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").insert({"title": title, "start_time": start_time}).execute()
-        st.session_state.calendar_key = str(uuid.uuid4())
         return True
     except: return False
 
@@ -206,7 +214,6 @@ def delete_schedule(id):
     if not supabase: return
     try:
         supabase.table("schedule").delete().eq("id", id).execute()
-        st.session_state.calendar_key = str(uuid.uuid4())
         return True
     except: return False
 
@@ -214,7 +221,6 @@ def update_schedule(id, title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").update({"title": title, "start_time": start_time}).eq("id", id).execute()
-        st.session_state.calendar_key = str(uuid.uuid4())
         return True
     except: return False
 
@@ -243,6 +249,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     if not scan_val: return
 
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
+    # 매핑 정보 확인
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
@@ -256,6 +263,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
                     disp_name = m_info.iloc[0]['품명']
                     disp_spec = m_info.iloc[0]['규격']
 
+    # 압축코드 확인
     is_compressed = False
     target_box_no = scan_val
     if p_code == "정보없음":
@@ -277,6 +285,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
                                 disp_name = m_info.iloc[0]['품명']
                                 disp_spec = m_info.iloc[0]['규격']
 
+    # 재고 상태 확인
     box_status, current_db_loc = "신규", "미지정"
     if not df_log.empty and 'box번호' in df_log.columns:
         df_log['temp_key'] = df_log['box번호'].astype(str).str.strip().str.upper()
@@ -320,6 +329,7 @@ def schedule_dialog(sel_date=None, event_data=None):
         st.subheader("일정 수정/삭제")
         new_title = st.text_input("업체명 / 내용", value=event_data["title"])
         try:
+            # 안전한 날짜 파싱 (Pandas)
             dt_obj = pd.to_datetime(event_data["start"])
             d_val = dt_obj.date()
             t_val = dt_obj.time()
