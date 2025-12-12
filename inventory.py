@@ -12,8 +12,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리(통합)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.11.1)")
+    st.set_page_config(page_title="재고관리(진단)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.11.2 - 진단모드)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -39,31 +39,37 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [대용량] 데이터 가져오기 (1000건 제한 돌파) ---
+# --- [강제 초기화 버튼] ---
+if st.button("🔄 캐시 데이터 강제 삭제 및 새로고침 (클릭)", type="primary", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+# --- [핵심] 대용량 데이터 가져오기 (에러 진단 포함) ---
 def fetch_all_data(table_name):
     if not supabase: return []
     all_data = []
-    # [수정] 한 번에 5000개씩 요청하여 통신 횟수 감소 (속도 향상 및 타임아웃 방지)
-    page_size = 5000 
+    page_size = 5000 # 한 번에 5000개 요청
     offset = 0
     
     while True:
         try:
+            # 5000개씩 끊어서 요청
             response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
             data = response.data
             
-            if not data: # 데이터가 없으면 종료
+            if not data:
                 break
                 
             all_data.extend(data)
             
-            if len(data) < page_size: # 가져온 개수가 요청보다 적으면 끝난 것
+            # 가져온 개수가 요청보다 적으면 마지막 페이지임
+            if len(data) < page_size:
                 break
                 
             offset += page_size
         except Exception as e:
-            # 에러 발생 시 로그만 찍고, 지금까지 가져온 거라도 반환 (멈춤 방지)
-            print(f"Fetch Error ({table_name}): {e}")
+            # [진단] 에러 발생 시 멈추지 말고 에러 메시지 출력
+            st.error(f"⚠️ {table_name} 데이터 로드 중 오류 발생 (offset: {offset}): {e}")
             break
             
     return all_data
@@ -73,25 +79,27 @@ def fetch_all_data(table_name):
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
-        # fetch_all_data 함수 강제 적용
-        data_m = fetch_all_data("품목표")
-        df_m = pd.DataFrame(data_m)
-        
-        data_map = fetch_all_data("매핑정보")
-        df_map = pd.DataFrame(data_map)
-        
-        data_l = fetch_all_data("입출고")
-        df_l = pd.DataFrame(data_l)
-        
-        data_d = fetch_all_data("상세내역") 
-        df_d = pd.DataFrame(data_d) 
+        # 진행 상황 표시
+        with st.spinner("대용량 데이터를 불러오는 중입니다... (잠시만 기다려주세요)"):
+            data_m = fetch_all_data("품목표")
+            df_m = pd.DataFrame(data_m)
+            
+            data_map = fetch_all_data("매핑정보")
+            df_map = pd.DataFrame(data_map)
+            
+            data_l = fetch_all_data("입출고")
+            df_l = pd.DataFrame(data_l)
+            
+            data_d = fetch_all_data("상세내역") 
+            df_d = pd.DataFrame(data_d) 
 
         for df in [df_m, df_map, df_l, df_d]:
             if not df.empty:
                 df.columns = [c.lower() for c in df.columns]
 
         return df_m, df_map, df_l, df_d
-    except Exception:
+    except Exception as e:
+        st.error(f"데이터 로드 전체 실패: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def clear_cache():
@@ -137,7 +145,7 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     return stock_boxes, merged, filtered_details
 
 # --- 데이터 업로드 ---
-def chunked_upsert(table_name, df, key_col, batch_size=5000): # 5000개씩
+def chunked_upsert(table_name, df, key_col, batch_size=5000):
     if not supabase: return False
     if df.empty: return False
     try:
@@ -160,7 +168,7 @@ def chunked_upsert(table_name, df, key_col, batch_size=5000): # 5000개씩
         st.error(f"실패: {e}")
         return False
 
-def chunked_insert(table_name, df, batch_size=5000): # 5000개씩
+def chunked_insert(table_name, df, batch_size=5000):
     if not supabase: return False
     if df.empty: return False
     try:
@@ -205,7 +213,6 @@ def insert_log(new_data_list):
 def fetch_schedules():
     if not supabase: return []
     try:
-        # 일정은 데이터가 적으므로 그냥 가져옴
         res = supabase.table("schedule").select("*").execute()
         events = []
         for item in res.data:
@@ -429,259 +436,4 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         """, unsafe_allow_html=True)
 
         def rack_click(key):
-            st.session_state.selected_rack = key
-
-        def aisle_btn(name):
-            qty = rack_summary.get(name, 0)
-            label = f"{name}\n({qty})" if qty > 0 else name
-            is_hl = (name in hl_list)
-            st.button(label, key=f"btn_{name}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(name,), use_container_width=True)
-
-        cl, cm, cr = st.columns([3.5, 0.1, 1.2]) 
-        with cl:
-            def rack_row(r_num):
-                cols = st.columns(7)
-                for c_idx, col in enumerate(cols):
-                    rack_key = f"{r_num}-{c_idx+1}"
-                    qty = rack_summary.get(rack_key, 0)
-                    label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                    is_hl = (rack_key in hl_list)
-                    col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
-            rack_row(6); aisle_btn("5~6 통로")
-            rack_row(5); st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            rack_row(4); aisle_btn("3~4 통로")
-            rack_row(3); st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            rack_row(2); aisle_btn("1~2 통로")
-            rack_row(1)
-        with cr:
-            st.markdown('<div class="rack7-label">Rack 7 & Aisle</div>', unsafe_allow_html=True)
-            c_r7, c_a7 = st.columns([1, 1])
-            with c_r7:
-                for i in range(12, 0, -1):
-                    rack_key = f"7-{i}"
-                    qty = rack_summary.get(rack_key, 0)
-                    label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                    is_hl = (rack_key in hl_list)
-                    st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
-            with c_a7: aisle_btn("7번 통로")
-
-    with c_list:
-        st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
-        st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
-
-@st.dialog("일정 관리")
-def schedule_dialog(sel_date=None, event_data=None):
-    if event_data:
-        st.subheader("일정 수정/삭제")
-        new_title = st.text_input("업체명 / 내용", value=event_data["title"])
-        try:
-            dt_obj = datetime.fromisoformat(event_data["start"])
-            d_val, t_val = dt_obj.date(), dt_obj.time()
-        except:
-            d_val, t_val = datetime.today().date(), datetime.now().time()
-        new_date = st.date_input("날짜", value=d_val)
-        new_time = st.time_input("시간", value=t_val)
-        c1, c2 = st.columns(2)
-        if c1.button("수정 저장", type="primary"):
-            final_dt = datetime.combine(new_date, new_time).isoformat()
-            if update_schedule(event_data["id"], new_title, final_dt):
-                st.success("수정되었습니다."); st.rerun()
-        if c2.button("삭제", type="secondary"):
-            if delete_schedule(event_data["id"]):
-                st.success("삭제되었습니다."); st.rerun()
-    else:
-        st.subheader("새 일정 등록")
-        st.write(f"선택된 날짜: {sel_date}")
-        title = st.text_input("업체명 / 내용")
-        time_val = st.time_input("시간", value=datetime.now().time())
-        if st.button("등록"):
-            if title:
-                final_dt = f"{sel_date}T{time_val}"
-                if add_schedule(title, final_dt):
-                    st.success("등록되었습니다."); st.rerun()
-            else: st.warning("내용을 입력하세요.")
-
-# --- 메인 ---
-def main():
-    init_session_state()
-    df_master, df_mapping, df_log, df_details = load_data_from_db()
-
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터", "6. 데이터 진단", "7. 월간 일정"])
-
-    with tab1:
-        c_h, c_r = st.columns([4, 1])
-        with c_h: st.subheader("🚀 스캔 작업")
-        with c_r: 
-            if st.button("🔄 새로고침", use_container_width=True, key='r1'): clear_cache(); st.rerun()
-
-        if st.session_state.proc_msg:
-            m_type, m_text = st.session_state.proc_msg
-            if m_type == 'success': st.success(m_text)
-            elif m_type == 'error': st.error(m_text)
-            else: st.info(m_text)
-
-        c1, c2, c3, c4 = st.columns([1.5, 1, 1, 2])
-        with c1: st.radio("모드", ["입고", "재고이동", "출고", "조회(검색)"], horizontal=True, key="work_mode")
-        with c2: st.text_input("적재 위치 (1-2-7)", key="curr_location")
-        with c3: st.text_input("파렛트 이름", key="curr_palette")
-        with c4: st.text_input("Box 번호 또는 압축코드 스캔", key="scan_input", on_change=buffer_scan, args=(df_master, df_mapping, df_log, df_details))
-
-        if st.session_state.scan_buffer:
-            disp_df = pd.DataFrame(st.session_state.scan_buffer)
-            cols_order = ['날짜', '구분', '입고구분', 'Box번호', '품목코드', '규격', '수량', '위치', '파렛트']
-            final_cols = [c for c in cols_order if c in disp_df.columns]
-            st.dataframe(disp_df[final_cols].iloc[::-1], use_container_width=True)
-            
-            csv_data = to_excel(disp_df[final_cols])
-            st.download_button("📥 스캔 목록 다운로드", data=csv_data, file_name=f"스캔목록_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        else: st.info("대기 중...")
-        
-        if st.button("💾 DB에 저장 (빠름)", type="primary", use_container_width=True): 
-            if insert_log(st.session_state.scan_buffer):
-                st.session_state.scan_buffer = []
-                st.session_state.proc_msg = ("success", "✅ 저장 완료!")
-                st.rerun()
-        if st.button("🗑️ 대기 목록 비우기", use_container_width=True): st.session_state.scan_buffer = []
-
-        st.divider()
-        st.subheader("📊 최근 입출고 이력 (전체)")
-        if not df_log.empty:
-            csv_data = to_excel(df_log)
-            st.download_button("📥 전체 입출고 이력 다운로드", data=csv_data, file_name=f"전체이력_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.dataframe(df_log.head(1000), use_container_width=True)
-        else: st.info("이력이 없습니다.")
-
-    with tab2:
-        view_inventory_dashboard(df_log, df_mapping, df_master, df_details)
-
-    with tab3:
-        st.subheader("📤 입출고 내역 일괄 업로드")
-        st.download_button("📥 샘플 양식 다운로드", get_sample_file(), "입출고_샘플.xlsx")
-        st.info("양식: 날짜 / 이동구분 / 입고구분 / Box번호 / 위치 / 파렛트")
-        
-        up = st.file_uploader("엑셀 파일", type=['xlsx', 'csv'])
-        if up and st.button("DB 업로드 (대용량 대응)"):
-            try:
-                df = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
-                clean_df = pd.DataFrame()
-                
-                df.columns = df.columns.str.strip().str.replace(' ', '')
-                col_box = next((c for c in df.columns if 'box' in c.lower() or '박스' in c), None)
-                if not col_box:
-                    st.error("❌ 'Box번호' 컬럼을 찾을 수 없습니다.")
-                    st.stop()
-                
-                col_gubun = next((c for c in df.columns if ('이동구분' in c) or ('구분' in c and '입고' not in c)), None)
-                col_in_type = next((c for c in df.columns if '입고구분' in c), None)
-                col_loc = next((c for c in df.columns if '위치' in c), None)
-                col_pal = next((c for c in df.columns if '파렛트' in c or '팔레트' in c), None)
-                col_date = next((c for c in df.columns if '날짜' in c), None)
-
-                if col_date: clean_df['날짜'] = df[col_date].astype(str).replace('nan', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                else: clean_df['날짜'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                clean_df['구분'] = df[col_gubun].astype(str) if col_gubun else '입고'
-                clean_df['입고구분'] = df[col_in_type].astype(str).replace('nan', '') if col_in_type else ''
-                clean_df['box번호'] = df[col_box].astype(str).str.strip().str.upper()
-                clean_df['위치'] = df[col_loc].astype(str).replace('nan', '') if col_loc else ''
-                clean_df['파렛트'] = df[col_pal].astype(str).replace('nan', '') if col_pal else ''
-
-                current_stock, _, _ = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
-                available_boxes = set(current_stock['match_key'].values) if not current_stock.empty else set()
-                outbound_check = clean_df[clean_df['구분'] == '출고']
-                missing_boxes = [b for b in outbound_check['box번호'] if b not in available_boxes]
-                
-                if missing_boxes:
-                    st.error(f"⛔ 업로드 불가: 다음 박스들은 현재 재고에 없어 출고할 수 없습니다.\n{missing_boxes[:10]} ...")
-                    st.stop()
-
-                if chunked_insert('입출고', clean_df):
-                    st.success(f"✅ 총 {len(clean_df)}건 업로드 완료!")
-                    clear_cache()
-                    st.rerun()
-            except Exception as e:
-                st.error(f"업로드 중 오류 발생: {e}")
-
-    with tab4:
-        st.subheader("📦 포장데이터(마스터) 등록 (대용량)")
-        with st.expander("🚨 데이터 전체 초기화 (주의)"):
-            st.warning("이 버튼을 누르면 모든 데이터가 삭제됩니다.")
-            if st.button("데이터 초기화 실행", type="primary"):
-                if reset_database():
-                    st.success("모든 데이터가 삭제되었습니다.")
-                    st.rerun()
-
-        up_pack = st.file_uploader("포장 파일 (.xlsx)", type=['xlsx'])
-        if up_pack and st.button("등록 (대용량)"):
-            try:
-                raw = pd.read_excel(up_pack, dtype=str)
-                raw = raw.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-                
-                grp = raw.groupby(['카톤박스번호', '박스자재코드']).size().reset_index(name='수량')
-                grp.columns = ['box번호', '품목코드', '수량']
-                grp['box번호'] = grp['box번호'].str.upper()
-                
-                dets = pd.DataFrame(columns=['box번호', '품목코드', '규격', '압축코드'])
-                if '압축코드' in raw.columns:
-                    dets = raw[['카톤박스번호', '박스자재코드', '박스자재규격', '압축코드']].copy()
-                    dets.columns = ['box번호', '품목코드', '규격', '압축코드']
-                    dets['box번호'] = dets['box번호'].str.upper()
-
-                items = raw[['박스자재코드', '박스자재명', '박스자재규격', '출고처명']].drop_duplicates('박스자재코드')
-                items.columns = ['품목코드', '품명', '규격', '공급업체']
-                items['품목코드'] = items['품목코드'].str.upper()
-                items['분류구분'] = ''
-                items['바코드'] = ''
-
-                st.write("품목표 업로드 중...")
-                chunked_upsert('품목표', items, '품목코드')
-                
-                st.write("매핑정보 업로드 중...")
-                chunked_upsert('매핑정보', grp, 'box번호')
-                
-                if not dets.empty:
-                    st.write("상세내역 업로드 중...")
-                    chunked_insert('상세내역', dets)
-                
-                clear_cache()
-                st.success("✅ 대용량 등록 완료!")
-                st.rerun()
-            except Exception as e: st.error(f"오류: {e}")
-
-    with tab5:
-        st.dataframe(df_master.head(1000))
-
-    with tab6:
-        st.subheader("🕵️‍♀️ 데이터 진단 (총량 확인)")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("품목표", f"{len(df_master)}건")
-        c2.metric("매핑정보", f"{len(df_mapping)}건")
-        c3.metric("입출고", f"{len(df_log)}건")
-        st.write("▼ 매핑정보 샘플")
-        st.dataframe(df_mapping.head(50))
-
-    with tab7:
-        st.subheader("🗓️ 월간 출고 일정")
-        try:
-            from streamlit_calendar import calendar
-            events = fetch_schedules()
-            cal = calendar(
-                events=events,
-                options={
-                    "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
-                    "initialView": "dayGridMonth",
-                },
-                key="my_calendar"
-            )
-            if cal.get("callback") == "dateClick":
-                schedule_dialog(sel_date=cal["dateClick"]["date"])
-            elif cal.get("callback") == "eventClick":
-                evt_id = cal["eventClick"]["event"]["id"]
-                evt_data = next((e for e in events if e["id"] == evt_id), None)
-                if evt_data: schedule_dialog(event_data=evt_data)
-        except ImportError:
-            st.error("캘린더 라이브러리가 설치되지 않았습니다. requirements.txt를 확인하세요.")
-
-if __name__ == '__main__':
-    main()
+            st.
