@@ -6,6 +6,12 @@ from supabase import create_client, Client
 import math
 import uuid
 
+# [안전장치] 캘린더 라이브러리 확인
+try:
+    from streamlit_calendar import calendar
+except ImportError:
+    st.warning("⚠️ 'streamlit-calendar' 라이브러리가 없습니다. '월간 일정' 탭은 리스트 모드로만 작동합니다.")
+
 # --- [1] 로그인 보안 ---
 def check_password():
     if 'password_correct' not in st.session_state:
@@ -13,8 +19,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.12.8)")
+    st.set_page_config(page_title="재고관리(Final)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.13.0)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -48,7 +54,7 @@ def fetch_all_data(table_name, sort_col):
     offset = 0
     while True:
         try:
-            # 1000개씩 끊어서 가져오되, sort_col로 정렬하여 누락 방지
+            # 정렬 기준(sort_col)을 적용하여 데이터 누락/중복 방지
             response = supabase.table(table_name).select("*").order(sort_col).range(offset, offset + page_size - 1).execute()
             data = response.data
             if not data: break
@@ -59,23 +65,26 @@ def fetch_all_data(table_name, sort_col):
             break
     return all_data
 
-# --- [3-A] 무거운 데이터 로드 ---
+# --- [3-A] 무거운 데이터 로드 (캐시 6시간) ---
 @st.cache_data(ttl=21600, show_spinner=False)
 def load_heavy_data():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
         data_m = fetch_all_data("품목표", "품목코드")
         df_m = pd.DataFrame(data_m)
+        
         data_map = fetch_all_data("매핑정보", "box번호")
         df_map = pd.DataFrame(data_map)
+        
         data_d = fetch_all_data("상세내역", "box번호")
         df_d = pd.DataFrame(data_d) 
+
         for df in [df_m, df_map, df_d]:
             if not df.empty: df.columns = [c.lower() for c in df.columns]
         return df_m, df_map, df_d
     except: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- [3-B] 가벼운 데이터 로드 ---
+# --- [3-B] 가벼운 데이터 로드 (캐시 10분) ---
 @st.cache_data(ttl=600, show_spinner=False)
 def load_light_data():
     if not supabase: return pd.DataFrame()
@@ -89,7 +98,7 @@ def load_light_data():
 def clear_cache_all():
     st.cache_data.clear()
 
-# --- [4] 재고 현황 계산 ---
+# --- [4] 재고 현황 계산 (안전장치 포함) ---
 @st.cache_data(show_spinner=False)
 def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     if df_log.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -190,7 +199,6 @@ def insert_log(new_data_list):
 def fetch_schedules_native():
     if not supabase: return []
     try:
-        # DB에서 그대로 가져옴
         res = supabase.table("schedule").select("*").order("start_time", desc=True).execute()
         return res.data
     except: return []
@@ -199,7 +207,7 @@ def add_schedule(title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").insert({"title": title, "start_time": start_time}).execute()
-        st.session_state.calendar_key = str(uuid.uuid4())
+        st.session_state.calendar_key = str(uuid.uuid4()) # 캘린더 갱신용
         return True
     except: return False
 
@@ -225,6 +233,7 @@ def init_session_state():
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
     if 'calendar_key' not in st.session_state: st.session_state.calendar_key = str(uuid.uuid4())
+    if 'view_mode' not in st.session_state: st.session_state.view_mode = "Calendar (달력)"
 
 def to_excel(df):
     output = io.BytesIO()
@@ -320,7 +329,6 @@ def schedule_dialog(sel_date=None, event_data=None):
     if event_data:
         st.subheader("일정 수정/삭제")
         new_title = st.text_input("업체명 / 내용", value=event_data["title"])
-        # [수정] 날짜 파싱 안전장치
         try:
             dt_obj = pd.to_datetime(event_data["start"])
             d_val = dt_obj.date()
@@ -340,6 +348,11 @@ def schedule_dialog(sel_date=None, event_data=None):
                 st.success("삭제되었습니다."); st.rerun()
     else:
         st.subheader("새 일정 등록")
+        # 날짜 타입 안전 변환
+        if isinstance(sel_date, str):
+            try: sel_date = pd.to_datetime(sel_date).date()
+            except: sel_date = datetime.now().date()
+            
         st.write(f"선택된 날짜: {sel_date}")
         title = st.text_input("업체명 / 내용")
         time_val = st.time_input("시간", value=datetime.now().time())
@@ -474,7 +487,7 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
         st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
 
-# --- 메인 (정의) ---
+# --- 메인 (정의부) ---
 def main():
     init_session_state()
     
@@ -627,7 +640,7 @@ def main():
         st.dataframe(df_mapping.head(50))
 
     with tab7:
-        st.subheader("🗓️ 월간 출고 일정 (리스트형)")
+        st.subheader("🗓️ 월간 출고 일정")
         
         # [하이브리드 모드]
         view_mode = st.radio("보기 모드", ["Calendar (달력)", "List (리스트)"], horizontal=True, key='view_mode_radio')
