@@ -20,7 +20,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.11.4)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.11.5)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -46,12 +46,7 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [강제 초기화 버튼] ---
-if st.button("🔄 [필수] 캐시 삭제 및 데이터 재로드", type="primary", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
-
-# --- [핵심 수정] 대용량 데이터 가져오기 (정렬 조건 제거로 호환성 확보) ---
+# --- [대용량] 데이터 가져오기 ---
 def fetch_all_data(table_name):
     if not supabase: return []
     all_data = []
@@ -60,7 +55,7 @@ def fetch_all_data(table_name):
     
     while True:
         try:
-            # [수정] .order("id") 제거 -> id 컬럼이 없는 테이블에서도 작동하도록 수정
+            # 순서 보장을 위해 order 추가 안함 (Supabase 기본 동작 의존, 에러 방지)
             response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
             data = response.data
             
@@ -74,7 +69,6 @@ def fetch_all_data(table_name):
                 
             offset += page_size
         except Exception as e:
-            # 에러 나면 지금까지 긁은거라도 반환 (멈춤 방지)
             print(f"Error fetching {table_name}: {e}")
             break
             
@@ -85,18 +79,18 @@ def fetch_all_data(table_name):
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
-        with st.spinner("데이터 로드 중..."):
-            data_m = fetch_all_data("품목표")
-            df_m = pd.DataFrame(data_m)
-            
-            data_map = fetch_all_data("매핑정보")
-            df_map = pd.DataFrame(data_map)
-            
-            data_l = fetch_all_data("입출고")
-            df_l = pd.DataFrame(data_l)
-            
-            data_d = fetch_all_data("상세내역") 
-            df_d = pd.DataFrame(data_d) 
+        # 진행률 표시 제거 (UI 깔끔하게)
+        data_m = fetch_all_data("품목표")
+        df_m = pd.DataFrame(data_m)
+        
+        data_map = fetch_all_data("매핑정보")
+        df_map = pd.DataFrame(data_map)
+        
+        data_l = fetch_all_data("입출고")
+        df_l = pd.DataFrame(data_l)
+        
+        data_d = fetch_all_data("상세내역") 
+        df_d = pd.DataFrame(data_d) 
 
         for df in [df_m, df_map, df_l, df_d]:
             if not df.empty:
@@ -109,12 +103,10 @@ def load_data_from_db():
 def clear_cache():
     st.cache_data.clear()
 
-# --- [4] 재고 현황 계산 (KeyError 방지 패치) ---
+# --- [4] 재고 현황 계산 ---
 @st.cache_data(show_spinner=False)
 def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
-    # [수정] 빈 데이터프레임이라도 컬럼은 가지고 있게 초기화 (Merge 에러 방지)
-    if df_log.empty: 
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if df_log.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])].copy()
@@ -122,26 +114,22 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     if stock_boxes.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # 키 생성
     stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
     
-    # [수정] df_mapping이 비었거나 키가 없을 때 대비
+    # 매핑정보 컬럼 없으면 생성 (에러 방지)
     if df_mapping.empty:
         df_mapping = pd.DataFrame(columns=['match_key', 'box번호', '품목코드', '수량'])
     else:
-        # box번호 컬럼이 있는지 확인
         if 'box번호' in df_mapping.columns:
             df_mapping['match_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
             if '품목코드' in df_mapping.columns:
                 df_mapping['품목코드'] = df_mapping['품목코드'].astype(str).str.strip().str.upper()
         else:
-            # 컬럼이 없으면 빈 컬럼 생성해서 에러 방지
             df_mapping['match_key'] = ""
 
     if not df_master.empty and '품목코드' in df_master.columns:
         df_master['품목코드'] = df_master['품목코드'].astype(str).str.strip().str.upper()
 
-    # 병합 (이제 df_mapping에 match_key가 무조건 있으므로 KeyError 안 남)
     merged = pd.merge(stock_boxes, df_mapping, on='match_key', how='left', suffixes=('', '_map'))
     merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
     merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
@@ -227,7 +215,7 @@ def insert_log(new_data_list):
         st.error(f"실패: {e}")
         return False
 
-# --- 일정 관리 ---
+# --- 일정 관리 (UI 갱신 로직 추가) ---
 def fetch_schedules():
     if not supabase: return []
     try:
@@ -250,6 +238,8 @@ def add_schedule(title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").insert({"title": title, "start_time": start_time}).execute()
+        # [수정] 캘린더 키 업데이트 (화면 갱신용)
+        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
         return True
     except Exception as e:
         st.error(f"추가 실패: {e}")
@@ -259,6 +249,7 @@ def update_schedule(id, title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").update({"title": title, "start_time": start_time}).eq("id", id).execute()
+        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
         return True
     except Exception as e:
         st.error(f"수정 실패: {e}")
@@ -268,6 +259,7 @@ def delete_schedule(id):
     if not supabase: return
     try:
         supabase.table("schedule").delete().eq("id", id).execute()
+        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
         return True
     except Exception as e:
         st.error(f"삭제 실패: {e}")
@@ -278,6 +270,7 @@ def init_session_state():
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
+    if 'calendar_key' not in st.session_state: st.session_state.calendar_key = 0
 
 def to_excel(df):
     output = io.BytesIO()
@@ -677,6 +670,12 @@ def main():
 
     with tab6:
         st.subheader("🕵️‍♀️ 데이터 진단 (총량 확인)")
+        
+        # [수정] 캐시 삭제 버튼 위치 이동 (Tab 6로)
+        if st.button("🔄 [필수] 캐시 삭제 및 데이터 재로드", type="primary", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+            
         c1, c2, c3 = st.columns(3)
         c1.metric("품목표", f"{len(df_master)}건")
         c2.metric("매핑정보", f"{len(df_mapping)}건")
@@ -689,13 +688,17 @@ def main():
         try:
             from streamlit_calendar import calendar
             events = fetch_schedules()
+            
+            # [수정] 캘린더 키에 세션 상태 변수 추가하여 강제 갱신 유도
+            cal_key = f"my_calendar_{st.session_state.calendar_key}"
+            
             cal = calendar(
                 events=events,
                 options={
                     "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
                     "initialView": "dayGridMonth",
                 },
-                key="my_calendar"
+                key=cal_key # 키 변경 -> 리렌더링 유발
             )
             if cal.get("callback") == "dateClick":
                 schedule_dialog(sel_date=cal["dateClick"]["date"])
