@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import io
 from supabase import create_client, Client
 import math
+import uuid # 고유 ID 생성을 위해 추가
 
 # [안전장치] 라이브러리 체크
 try:
@@ -19,8 +20,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리(안정화)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.12.1)")
+    st.set_page_config(page_title="재고관리(최종)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.12.2)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -46,46 +47,39 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [핵심 수정] 대용량 데이터 가져오기 (정렬 필수!) ---
+# --- [공통] 대용량 데이터 가져오기 (정렬 필수) ---
 def fetch_all_data(table_name, sort_col):
     if not supabase: return []
     all_data = []
-    page_size = 1000 # 1000개씩 안전하게
+    page_size = 1000
     offset = 0
     
     while True:
         try:
-            # [수정] order(sort_col)을 반드시 넣어야 페이지네이션이 정상 작동함
+            # sort_col 기준으로 정렬해야 페이지네이션이 정상 작동함
             response = supabase.table(table_name).select("*").order(sort_col).range(offset, offset + page_size - 1).execute()
             data = response.data
             
             if not data: break
             all_data.extend(data)
-            
             if len(data) < page_size: break
             offset += page_size
         except Exception as e:
-            # 에러 시 로그만 찍고 멈춤 (데이터 일부라도 살림)
             print(f"Error fetching {table_name}: {e}")
             break
-            
     return all_data
 
 # --- [3-A] 무거운 데이터 로드 (매핑/상세/마스터) ---
-# [수정] 정렬 컬럼 명시적 지정
 @st.cache_data(ttl=21600, show_spinner=False)
 def load_heavy_data():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
-        # 품목표 -> 품목코드 정렬
         data_m = fetch_all_data("품목표", "품목코드")
         df_m = pd.DataFrame(data_m)
         
-        # 매핑정보 -> box번호 정렬 (이게 빠져서 1000개만 나왔던 것!)
         data_map = fetch_all_data("매핑정보", "box번호")
         df_map = pd.DataFrame(data_map)
         
-        # 상세내역 -> box번호 정렬
         data_d = fetch_all_data("상세내역", "box번호")
         df_d = pd.DataFrame(data_d) 
 
@@ -102,7 +96,6 @@ def load_heavy_data():
 def load_light_data():
     if not supabase: return pd.DataFrame()
     try:
-        # 입출고 -> id 정렬
         data_l = fetch_all_data("입출고", "id")
         df_l = pd.DataFrame(data_l)
         if not df_l.empty:
@@ -225,13 +218,20 @@ def insert_log(new_data_list):
         st.error(f"실패: {e}")
         return False
 
-# --- 일정 관리 (별도 로드) ---
+# --- 일정 관리 (안전장치 추가) ---
 def fetch_schedules():
     if not supabase: return []
     try:
         res = supabase.table("schedule").select("*").execute()
         events = []
         for item in res.data:
+            # 날짜 형식 검증 (ISO 형식이 아니면 스킵)
+            try:
+                # 간단한 파싱 테스트
+                datetime.fromisoformat(item["start_time"])
+            except ValueError:
+                continue # 날짜 형식이 깨진 데이터는 무시 (캘린더 보호)
+
             events.append({
                 "id": str(item["id"]),
                 "title": item["title"],
@@ -239,6 +239,17 @@ def fetch_schedules():
                 "end": item.get("end_time", ""),
                 "allDay": False
             })
+        
+        # [핵심] 이벤트가 하나도 없으면 달력이 안 그려지는 버그 방지용 더미 데이터
+        if not events:
+            events.append({
+                "id": "dummy_init",
+                "title": "",
+                "start": datetime.now().isoformat(),
+                "display": "background", # 배경색으로만 표시 (사용자 눈엔 안 보임)
+                "backgroundColor": "#ffffff" 
+            })
+            
         return events
     except Exception as e:
         return []
@@ -247,7 +258,7 @@ def add_schedule(title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").insert({"title": title, "start_time": start_time}).execute()
-        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
+        st.session_state.calendar_key = str(uuid.uuid4()) # 강제 리렌더링
         return True
     except Exception as e:
         st.error(f"추가 실패: {e}")
@@ -257,7 +268,7 @@ def update_schedule(id, title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").update({"title": title, "start_time": start_time}).eq("id", id).execute()
-        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
+        st.session_state.calendar_key = str(uuid.uuid4())
         return True
     except Exception as e:
         st.error(f"수정 실패: {e}")
@@ -267,7 +278,7 @@ def delete_schedule(id):
     if not supabase: return
     try:
         supabase.table("schedule").delete().eq("id", id).execute()
-        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
+        st.session_state.calendar_key = str(uuid.uuid4())
         return True
     except Exception as e:
         st.error(f"삭제 실패: {e}")
@@ -278,7 +289,7 @@ def init_session_state():
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
-    if 'calendar_key' not in st.session_state: st.session_state.calendar_key = 0
+    if 'calendar_key' not in st.session_state: st.session_state.calendar_key = str(uuid.uuid4())
 
 def to_excel(df):
     output = io.BytesIO()
@@ -530,11 +541,9 @@ def schedule_dialog(sel_date=None, event_data=None):
 def main():
     init_session_state()
     
-    # [수정] 무거운 데이터 로드 (매핑/상세/마스터) - 캐시 6시간
     with st.spinner("📦 기초 데이터 로드 중..."):
         df_master, df_mapping, df_details = load_heavy_data()
         
-    # 가벼운 데이터 로드 (입출고) - 캐시 10분
     df_log = load_light_data()
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터", "6. 데이터 진단", "7. 월간 일정"])
@@ -638,7 +647,7 @@ def main():
         with st.expander("🚨 데이터 전체 초기화 (주의)"):
             st.warning("이 버튼을 누르면 모든 데이터가 삭제됩니다.")
             if st.button("데이터 초기화 실행", type="primary"):
-                if reset_database(): # 함수 없어도 됨(기존 코드엔 있었음) - 삭제
+                if reset_database():
                     st.success("모든 데이터가 삭제되었습니다.")
                     st.rerun()
 
@@ -698,30 +707,30 @@ def main():
 
     with tab7:
         st.subheader("🗓️ 월간 출고 일정")
-        # [수정] 캘린더를 위한 이벤트 데이터 로드 (별도)
-        cal_events = fetch_schedules()
-        
         try:
             from streamlit_calendar import calendar
+            events = fetch_schedules()
             cal_key = f"my_calendar_{st.session_state.calendar_key}"
             
             cal = calendar(
-                events=cal_events,
+                events=events,
                 options={
                     "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
                     "initialView": "dayGridMonth",
                 },
+                custom_css={'height': '600px'}, # 높이 고정
                 key=cal_key
             )
-            
             if cal.get("callback") == "dateClick":
                 schedule_dialog(sel_date=cal["dateClick"]["date"])
             elif cal.get("callback") == "eventClick":
                 evt_id = cal["eventClick"]["event"]["id"]
-                evt_data = next((e for e in cal_events if e["id"] == evt_id), None)
+                evt_data = next((e for e in events if e["id"] == evt_id), None)
                 if evt_data: schedule_dialog(event_data=evt_data)
+        except ImportError:
+            st.error("❌ 'streamlit-calendar' 라이브러리가 설치되지 않았습니다. requirements.txt를 확인해주세요.")
         except Exception as e:
-            st.error(f"캘린더 로드 오류: {e}")
+            st.error(f"❌ 캘린더 오류: {e}")
 
 if __name__ == '__main__':
     main()
