@@ -5,8 +5,6 @@ import io
 from supabase import create_client, Client
 import math
 
-# [변경] 캘린더 라이브러리 제거 (이제 필요 없음)
-
 # --- [1] 로그인 보안 ---
 def check_password():
     if 'password_correct' not in st.session_state:
@@ -15,7 +13,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(리스트형)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.12.3)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.12.4)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -41,7 +39,7 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [공통] 대용량 데이터 가져오기 (정렬 필수) ---
+# --- [공통] 대용량 데이터 가져오기 ---
 def fetch_all_data(table_name, sort_col):
     if not supabase: return []
     all_data = []
@@ -210,15 +208,12 @@ def insert_log(new_data_list):
         return False
 
 # --- 일정 관리 (Native) ---
-# [수정] 일정 가져오기 (가공 없이 그대로)
 def fetch_schedules_native():
     if not supabase: return []
     try:
-        # 날짜 내림차순 정렬
         res = supabase.table("schedule").select("*").order("start_time", desc=True).execute()
         return res.data
     except Exception as e:
-        st.error(f"일정 로드 실패: {e}")
         return []
 
 def add_schedule(title, start_time):
@@ -333,130 +328,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             st.session_state.proc_msg = ("success", f"✅ {msg_prefix}{mode}: {target_box_no}")
             
     st.session_state.scan_input = ""
-
-@st.fragment
-def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
-    if df_log.empty:
-        st.info("데이터 없음")
-        return
-
-    stock_boxes, merged, filtered_details = calculate_stock_snapshot(df_log, df_mapping, df_master, df_details)
-
-    req_cols = ['날짜', '구분', '입고구분', 'box번호', '위치', '파렛트', '품목코드', '규격', '공급업체', '수량']
-    final_cols = [c for c in req_cols if c in merged.columns]
-    
-    d1, d2, d3 = st.columns(3)
-    with d1: st.download_button("📥 재고 요약 다운로드", to_excel(merged[final_cols]), "재고요약.xlsx", use_container_width=True)
-    with d2: st.download_button("📥 상세 내역 다운로드 (재고분)", to_excel(filtered_details), "상세내역_재고.xlsx", use_container_width=True)
-    
-    st.divider()
-    sc1, sc2, sc3 = st.columns([1, 1, 2])
-    with sc1: search_target = st.selectbox("검색 기준", ["전체", "품목코드", "규격", "box번호"])
-    with sc2: exact_match = st.checkbox("정확히 일치", value=True)
-    with sc3: search_query = st.text_input("검색어", key="sq")
-
-    filtered_df = merged
-    hl_list = []
-
-    if search_query and not filtered_df.empty:
-        q = search_query.strip().upper()
-        if search_target == "전체":
-            if exact_match:
-                mask = ((filtered_df['품목코드'] == q) | (filtered_df['품명'] == q) | (filtered_df['box번호'] == q) | (filtered_df['규격'] == q))
-            else:
-                mask = (filtered_df['품목코드'].astype(str).str.contains(q, na=False) | filtered_df['품명'].astype(str).str.contains(q, na=False) | filtered_df['box번호'].astype(str).str.contains(q, na=False) | filtered_df['규격'].astype(str).str.contains(q, na=False))
-        else:
-            if exact_match: mask = filtered_df[search_target] == q
-            else: mask = filtered_df[search_target].astype(str).str.contains(q, na=False)
-        
-        filtered_df = filtered_df[mask]
-        for loc in filtered_df['위치'].unique():
-            clean_loc = str(loc).strip()
-            if '-' in clean_loc and '통로' not in clean_loc:
-                parts = clean_loc.split('-')
-                if len(parts) >= 3: hl_list.append(f"{parts[0]}-{parts[2]}")
-                elif len(parts) == 2: hl_list.append(f"{parts[0]}-{parts[1]}")
-            else: hl_list.append(clean_loc)
-    
-    if st.session_state.selected_rack and not filtered_df.empty:
-        sel = st.session_state.selected_rack
-        hl_list.append(sel)
-        def filter_loc(l):
-            l = str(l).strip()
-            if '통로' in sel: return l == sel
-            else:
-                if '-' in l and '통로' not in l: return l.startswith(sel.split('-')[0]) and l.endswith(sel.split('-')[-1])
-                return False
-        filtered_df = filtered_df[filtered_df['위치'].apply(filter_loc)]
-
-    c_map, c_list = st.columns([1.5, 1])
-    with c_map:
-        st.markdown("##### 🗺️ 창고 배치도")
-        rack_summary = {}
-        if not stock_boxes.empty and '위치' in stock_boxes.columns:
-            locs = stock_boxes['위치'].astype(str).str.strip()
-            for raw_loc in locs:
-                if not raw_loc or raw_loc == '미지정': continue
-                if '통로' in raw_loc: rack_summary[raw_loc] = rack_summary.get(raw_loc, 0) + 1
-                else:
-                    parts = raw_loc.split('-')
-                    if len(parts) >= 3: k = f"{parts[0]}-{parts[2]}"
-                    elif len(parts) == 2: k = f"{parts[0]}-{parts[1]}"
-                    else: k = raw_loc
-                    rack_summary[k] = rack_summary.get(k, 0) + 1
-
-        st.markdown("""
-        <style>
-        div[data-testid="column"] button { width: 100%; height: 40px !important; margin: 1px 0px !important; padding: 0px !important; font-size: 10px !important; font-weight: 700 !important; border-radius: 4px !important; border: 1px solid #ccc; }
-        div[data-testid="column"] button:hover { border-color: #333 !important; transform: scale(1.05); z-index: 5; }
-        button[kind="primary"] { background-color: #ffcdd2 !important; color: #b71c1c !important; border: 2px solid #d32f2f !important; }
-        button[kind="secondary"] { background-color: #ffffff !important; color: #555 !important; }
-        .rack-spacer { height: 10px; width: 100%; } 
-        .rack7-label { text-align: center; font-weight: bold; color: #555; margin-bottom: 5px; font-size: 12px; }
-        </style>
-        """, unsafe_allow_html=True)
-
-        def rack_click(key):
-            st.session_state.selected_rack = key
-
-        def aisle_btn(name):
-            qty = rack_summary.get(name, 0)
-            label = f"{name}\n({qty})" if qty > 0 else name
-            is_hl = (name in hl_list)
-            st.button(label, key=f"btn_{name}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(name,), use_container_width=True)
-
-        cl, cm, cr = st.columns([3.5, 0.1, 1.2]) 
-        with cl:
-            def rack_row(r_num):
-                cols = st.columns(7)
-                for c_idx, col in enumerate(cols):
-                    rack_key = f"{r_num}-{c_idx+1}"
-                    qty = rack_summary.get(rack_key, 0)
-                    label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                    is_hl = (rack_key in hl_list)
-                    col.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,))
-            rack_row(6); aisle_btn("5~6 통로")
-            rack_row(5); st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            rack_row(4); aisle_btn("3~4 통로")
-            rack_row(3); st.markdown('<div class="rack-spacer"></div>', unsafe_allow_html=True)
-            rack_row(2); aisle_btn("1~2 통로")
-            rack_row(1)
-        with cr:
-            st.markdown('<div class="rack7-label">Rack 7 & Aisle</div>', unsafe_allow_html=True)
-            c_r7, c_a7 = st.columns([1, 1])
-            with c_r7:
-                for i in range(12, 0, -1):
-                    rack_key = f"7-{i}"
-                    qty = rack_summary.get(rack_key, 0)
-                    label = f"{rack_key}\n({qty})" if qty > 0 else rack_key
-                    is_hl = (rack_key in hl_list)
-                    st.button(label, key=f"btn_{rack_key}", type="primary" if is_hl else "secondary", on_click=rack_click, args=(rack_key,), use_container_width=True)
-            with c_a7: aisle_btn("7번 통로")
-
-    with c_list:
-        st.markdown(f"##### 📋 재고 리스트 ({len(filtered_df)}건)")
-        final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
-        st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
 
 # --- 메인 ---
 def main():
@@ -628,8 +499,6 @@ def main():
 
     with tab7:
         st.subheader("🗓️ 월간 출고 일정 (리스트형)")
-        
-        # [변경] 캘린더 라이브러리 제거 -> Native Streamlit UI 적용
         c1, c2 = st.columns([1, 2])
         
         with c1:
@@ -649,22 +518,23 @@ def main():
 
         with c2:
             st.markdown(f"##### 📋 {sel_date.strftime('%Y-%m-%d')} 일정 목록")
-            # 전체 일정 가져오기
             all_schedules = fetch_schedules_native()
-            
-            # 선택된 날짜의 일정 필터링
             daily_events = []
+            
+            # [수정] 날짜 변환 오류 방지 로직 적용
             for s in all_schedules:
                 try:
-                    s_dt = datetime.fromisoformat(s['start_time'])
-                    if s_dt.date() == sel_date:
+                    # 유연한 날짜 파싱 (Pandas 활용)
+                    dt = pd.to_datetime(s['start_time']).to_pydatetime()
+                    if dt.date() == sel_date:
+                        s['parsed_time'] = dt # 파싱된 시간 저장
                         daily_events.append(s)
-                except:
-                    continue
+                except Exception:
+                    continue # 날짜 형식 깨진건 무시
             
             if daily_events:
                 for evt in daily_events:
-                    with st.expander(f"{evt['title']} ({datetime.fromisoformat(evt['start_time']).strftime('%H:%M')})"):
+                    with st.expander(f"{evt['title']} ({evt['parsed_time'].strftime('%H:%M')})"):
                         if st.button("삭제", key=f"del_{evt['id']}", type="secondary"):
                             if delete_schedule(evt['id']):
                                 st.rerun()
@@ -675,8 +545,11 @@ def main():
         st.markdown("##### 📅 전체 일정 리스트 (최신순)")
         if all_schedules:
             df_sched = pd.DataFrame(all_schedules)
-            # 보기 좋게 가공
-            df_sched['날짜'] = df_sched['start_time'].apply(lambda x: datetime.fromisoformat(x).strftime('%Y-%m-%d %H:%M') if x else '')
+            # [핵심 수정] 에러가 났던 부분을 Pandas의 강력한 to_datetime으로 교체
+            # errors='coerce'는 변환 안 되는 이상한 값은 NaT(빈값)로 만들어버림 -> 에러 안 남
+            df_sched['dt_obj'] = pd.to_datetime(df_sched['start_time'], errors='coerce')
+            df_sched['날짜'] = df_sched['dt_obj'].dt.strftime('%Y-%m-%d %H:%M').fillna("날짜 오류")
+            
             st.dataframe(df_sched[['날짜', 'title']], use_container_width=True, height=300)
 
 if __name__ == '__main__':
