@@ -4,14 +4,8 @@ from datetime import datetime, timedelta
 import io
 from supabase import create_client, Client
 import math
-import uuid # 고유 ID 생성을 위해 추가
 
-# [안전장치] 라이브러리 체크
-try:
-    from streamlit_calendar import calendar
-except ImportError:
-    st.error("🚨 'streamlit-calendar' 라이브러리가 없습니다. requirements.txt를 확인하세요.")
-    st.stop()
+# [변경] 캘린더 라이브러리 제거 (이제 필요 없음)
 
 # --- [1] 로그인 보안 ---
 def check_password():
@@ -20,8 +14,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.12.2)")
+    st.set_page_config(page_title="재고관리(리스트형)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.12.3)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -56,10 +50,8 @@ def fetch_all_data(table_name, sort_col):
     
     while True:
         try:
-            # sort_col 기준으로 정렬해야 페이지네이션이 정상 작동함
             response = supabase.table(table_name).select("*").order(sort_col).range(offset, offset + page_size - 1).execute()
             data = response.data
-            
             if not data: break
             all_data.extend(data)
             if len(data) < page_size: break
@@ -69,7 +61,7 @@ def fetch_all_data(table_name, sort_col):
             break
     return all_data
 
-# --- [3-A] 무거운 데이터 로드 (매핑/상세/마스터) ---
+# --- [3-A] 무거운 데이터 로드 ---
 @st.cache_data(ttl=21600, show_spinner=False)
 def load_heavy_data():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -86,12 +78,11 @@ def load_heavy_data():
         for df in [df_m, df_map, df_d]:
             if not df.empty:
                 df.columns = [c.lower() for c in df.columns]
-                
         return df_m, df_map, df_d
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- [3-B] 가벼운 데이터 로드 (입출고) ---
+# --- [3-B] 가벼운 데이터 로드 ---
 @st.cache_data(ttl=600, show_spinner=False)
 def load_light_data():
     if not supabase: return pd.DataFrame()
@@ -212,73 +203,37 @@ def insert_log(new_data_list):
                 "파렛트": item.get("파렛트", "")
             })
         supabase.table("입출고").insert(cleaned_list).execute()
-        st.cache_data.clear() 
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"실패: {e}")
         return False
 
-# --- 일정 관리 (안전장치 추가) ---
-def fetch_schedules():
+# --- 일정 관리 (Native) ---
+# [수정] 일정 가져오기 (가공 없이 그대로)
+def fetch_schedules_native():
     if not supabase: return []
     try:
-        res = supabase.table("schedule").select("*").execute()
-        events = []
-        for item in res.data:
-            # 날짜 형식 검증 (ISO 형식이 아니면 스킵)
-            try:
-                # 간단한 파싱 테스트
-                datetime.fromisoformat(item["start_time"])
-            except ValueError:
-                continue # 날짜 형식이 깨진 데이터는 무시 (캘린더 보호)
-
-            events.append({
-                "id": str(item["id"]),
-                "title": item["title"],
-                "start": item["start_time"],
-                "end": item.get("end_time", ""),
-                "allDay": False
-            })
-        
-        # [핵심] 이벤트가 하나도 없으면 달력이 안 그려지는 버그 방지용 더미 데이터
-        if not events:
-            events.append({
-                "id": "dummy_init",
-                "title": "",
-                "start": datetime.now().isoformat(),
-                "display": "background", # 배경색으로만 표시 (사용자 눈엔 안 보임)
-                "backgroundColor": "#ffffff" 
-            })
-            
-        return events
+        # 날짜 내림차순 정렬
+        res = supabase.table("schedule").select("*").order("start_time", desc=True).execute()
+        return res.data
     except Exception as e:
+        st.error(f"일정 로드 실패: {e}")
         return []
 
 def add_schedule(title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").insert({"title": title, "start_time": start_time}).execute()
-        st.session_state.calendar_key = str(uuid.uuid4()) # 강제 리렌더링
         return True
     except Exception as e:
         st.error(f"추가 실패: {e}")
-        return False
-
-def update_schedule(id, title, start_time):
-    if not supabase: return
-    try:
-        supabase.table("schedule").update({"title": title, "start_time": start_time}).eq("id", id).execute()
-        st.session_state.calendar_key = str(uuid.uuid4())
-        return True
-    except Exception as e:
-        st.error(f"수정 실패: {e}")
         return False
 
 def delete_schedule(id):
     if not supabase: return
     try:
         supabase.table("schedule").delete().eq("id", id).execute()
-        st.session_state.calendar_key = str(uuid.uuid4())
         return True
     except Exception as e:
         st.error(f"삭제 실패: {e}")
@@ -289,7 +244,6 @@ def init_session_state():
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
-    if 'calendar_key' not in st.session_state: st.session_state.calendar_key = str(uuid.uuid4())
 
 def to_excel(df):
     output = io.BytesIO()
@@ -309,7 +263,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     if not scan_val: return
 
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
-    
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
@@ -505,38 +458,6 @@ def view_inventory_dashboard(df_log, df_mapping, df_master, df_details):
         final_cols_disp = [c for c in req_cols if c in filtered_df.columns]
         st.dataframe(filtered_df[final_cols_disp], use_container_width=True, height=600)
 
-@st.dialog("일정 관리")
-def schedule_dialog(sel_date=None, event_data=None):
-    if event_data:
-        st.subheader("일정 수정/삭제")
-        new_title = st.text_input("업체명 / 내용", value=event_data["title"])
-        try:
-            dt_obj = datetime.fromisoformat(event_data["start"])
-            d_val, t_val = dt_obj.date(), dt_obj.time()
-        except:
-            d_val, t_val = datetime.today().date(), datetime.now().time()
-        new_date = st.date_input("날짜", value=d_val)
-        new_time = st.time_input("시간", value=t_val)
-        c1, c2 = st.columns(2)
-        if c1.button("수정 저장", type="primary"):
-            final_dt = datetime.combine(new_date, new_time).isoformat()
-            if update_schedule(event_data["id"], new_title, final_dt):
-                st.success("수정되었습니다."); st.rerun()
-        if c2.button("삭제", type="secondary"):
-            if delete_schedule(event_data["id"]):
-                st.success("삭제되었습니다."); st.rerun()
-    else:
-        st.subheader("새 일정 등록")
-        st.write(f"선택된 날짜: {sel_date}")
-        title = st.text_input("업체명 / 내용")
-        time_val = st.time_input("시간", value=datetime.now().time())
-        if st.button("등록"):
-            if title:
-                final_dt = f"{sel_date}T{time_val}"
-                if add_schedule(title, final_dt):
-                    st.success("등록되었습니다."); st.rerun()
-            else: st.warning("내용을 입력하세요.")
-
 # --- 메인 ---
 def main():
     init_session_state()
@@ -706,31 +627,57 @@ def main():
         st.dataframe(df_mapping.head(50))
 
     with tab7:
-        st.subheader("🗓️ 월간 출고 일정")
-        try:
-            from streamlit_calendar import calendar
-            events = fetch_schedules()
-            cal_key = f"my_calendar_{st.session_state.calendar_key}"
+        st.subheader("🗓️ 월간 출고 일정 (리스트형)")
+        
+        # [변경] 캘린더 라이브러리 제거 -> Native Streamlit UI 적용
+        c1, c2 = st.columns([1, 2])
+        
+        with c1:
+            st.markdown("##### ✏️ 일정 등록")
+            sel_date = st.date_input("날짜 선택", value=datetime.now())
+            evt_title = st.text_input("업체명 / 내용")
+            evt_time = st.time_input("시간", value=datetime.now().time())
             
-            cal = calendar(
-                events=events,
-                options={
-                    "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
-                    "initialView": "dayGridMonth",
-                },
-                custom_css={'height': '600px'}, # 높이 고정
-                key=cal_key
-            )
-            if cal.get("callback") == "dateClick":
-                schedule_dialog(sel_date=cal["dateClick"]["date"])
-            elif cal.get("callback") == "eventClick":
-                evt_id = cal["eventClick"]["event"]["id"]
-                evt_data = next((e for e in events if e["id"] == evt_id), None)
-                if evt_data: schedule_dialog(event_data=evt_data)
-        except ImportError:
-            st.error("❌ 'streamlit-calendar' 라이브러리가 설치되지 않았습니다. requirements.txt를 확인해주세요.")
-        except Exception as e:
-            st.error(f"❌ 캘린더 오류: {e}")
+            if st.button("일정 추가", type="primary", use_container_width=True):
+                if evt_title:
+                    final_dt = datetime.combine(sel_date, evt_time).isoformat()
+                    if add_schedule(evt_title, final_dt):
+                        st.success("✅ 등록됨")
+                        st.rerun()
+                else:
+                    st.warning("내용을 입력하세요.")
+
+        with c2:
+            st.markdown(f"##### 📋 {sel_date.strftime('%Y-%m-%d')} 일정 목록")
+            # 전체 일정 가져오기
+            all_schedules = fetch_schedules_native()
+            
+            # 선택된 날짜의 일정 필터링
+            daily_events = []
+            for s in all_schedules:
+                try:
+                    s_dt = datetime.fromisoformat(s['start_time'])
+                    if s_dt.date() == sel_date:
+                        daily_events.append(s)
+                except:
+                    continue
+            
+            if daily_events:
+                for evt in daily_events:
+                    with st.expander(f"{evt['title']} ({datetime.fromisoformat(evt['start_time']).strftime('%H:%M')})"):
+                        if st.button("삭제", key=f"del_{evt['id']}", type="secondary"):
+                            if delete_schedule(evt['id']):
+                                st.rerun()
+            else:
+                st.info("해당 날짜에 일정이 없습니다.")
+
+        st.divider()
+        st.markdown("##### 📅 전체 일정 리스트 (최신순)")
+        if all_schedules:
+            df_sched = pd.DataFrame(all_schedules)
+            # 보기 좋게 가공
+            df_sched['날짜'] = df_sched['start_time'].apply(lambda x: datetime.fromisoformat(x).strftime('%Y-%m-%d %H:%M') if x else '')
+            st.dataframe(df_sched[['날짜', 'title']], use_container_width=True, height=300)
 
 if __name__ == '__main__':
     main()
