@@ -521,7 +521,7 @@ def main():
             all_schedules = fetch_schedules_native()
             daily_events = []
             
-            # [수정] 날짜 변환 오류 방지 로직 적용
+            # [핵심 수정] 날짜 변환 오류 방지 로직 적용
             for s in all_schedules:
                 try:
                     # 유연한 날짜 파싱 (Pandas 활용)
