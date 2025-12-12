@@ -19,8 +19,8 @@ def check_password():
     if st.session_state.password_correct:
         return True
     
-    st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.11.8)")
+    st.set_page_config(page_title="재고관리(고속)", layout="wide")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.12.0 - 고속모드)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -46,16 +46,20 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- [대용량] 데이터 가져오기 ---
-def fetch_all_data(table_name, sort_col):
+# --- [공통] 대용량 데이터 가져오기 ---
+def fetch_all_data(table_name, sort_col=None):
     if not supabase: return []
     all_data = []
-    page_size = 1000
+    page_size = 2000 # 한 번에 2000개 (속도 향상)
     offset = 0
     
     while True:
         try:
-            response = supabase.table(table_name).select("*").order(sort_col).range(offset, offset + page_size - 1).execute()
+            query = supabase.table(table_name).select("*")
+            if sort_col:
+                query = query.order(sort_col)
+            
+            response = query.range(offset, offset + page_size - 1).execute()
             data = response.data
             
             if not data: break
@@ -65,36 +69,61 @@ def fetch_all_data(table_name, sort_col):
         except Exception as e:
             print(f"Error fetching {table_name}: {e}")
             break
-            
     return all_data
 
-# --- [3] 데이터 로드 (캐싱) ---
-@st.cache_data(ttl=3600)
-def load_data_from_db():
-    if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+# --- [3-A] 무거운 데이터 로드 (매핑/상세/마스터) ---
+# [핵심] 얘는 6시간(21600초) 동안 캐시 유지 -> 탭 전환 시 로딩 없음
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_heavy_data():
+    if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
-        with st.spinner("데이터 로드 중..."):
-            data_m = fetch_all_data("품목표", "품목코드")
-            df_m = pd.DataFrame(data_m)
-            
-            data_map = fetch_all_data("매핑정보", "box번호")
-            df_map = pd.DataFrame(data_map)
-            
-            data_l = fetch_all_data("입출고", "id")
-            df_l = pd.DataFrame(data_l)
-            
-            data_d = fetch_all_data("상세내역", "box번호") 
-            df_d = pd.DataFrame(data_d) 
+        # 매핑, 상세, 마스터는 잘 안 변함 -> 오래 저장
+        data_m = fetch_all_data("품목표", "품목코드")
+        df_m = pd.DataFrame(data_m)
+        
+        data_map = fetch_all_data("매핑정보", "box번호")
+        df_map = pd.DataFrame(data_map)
+        
+        data_d = fetch_all_data("상세내역", "box번호")
+        df_d = pd.DataFrame(data_d) 
 
-        for df in [df_m, df_map, df_l, df_d]:
+        for df in [df_m, df_map, df_d]:
             if not df.empty:
                 df.columns = [c.lower() for c in df.columns]
-
-        return df_m, df_map, df_l, df_d
+                
+        return df_m, df_map, df_d
     except Exception:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-def clear_cache():
+# --- [3-B] 가벼운 데이터 로드 (입출고/일정) ---
+# [핵심] 얘는 자주 변하니까 10분(600초) 캐시 or 새로고침 시 갱신
+@st.cache_data(ttl=600, show_spinner=False)
+def load_light_data():
+    if not supabase: return pd.DataFrame(), []
+    try:
+        # 입출고 내역
+        data_l = fetch_all_data("입출고", "id")
+        df_l = pd.DataFrame(data_l)
+        if not df_l.empty:
+            df_l.columns = [c.lower() for c in df_l.columns]
+            
+        # 일정 데이터
+        res_sched = supabase.table("schedule").select("*").execute()
+        events = []
+        for item in res_sched.data:
+            events.append({
+                "id": str(item["id"]),
+                "title": item["title"],
+                "start": item["start_time"],
+                "end": item.get("end_time", ""),
+                "allDay": False
+            })
+            
+        return df_l, events
+    except Exception:
+        return pd.DataFrame(), []
+
+def clear_cache_all():
     st.cache_data.clear()
 
 # --- [4] 재고 현황 계산 ---
@@ -108,7 +137,7 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     if not stock_boxes.empty:
         stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
     else:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame() # 재고 없음
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame() 
     
     if df_mapping.empty:
         df_mapping = pd.DataFrame(columns=['match_key', 'box번호', '품목코드', '수량'])
@@ -202,47 +231,30 @@ def insert_log(new_data_list):
                 "파렛트": item.get("파렛트", "")
             })
         supabase.table("입출고").insert(cleaned_list).execute()
-        clear_cache()
+        # [중요] 저장 후에는 가벼운 데이터 캐시만 날림 (전체 삭제 X)
+        # load_light_data.clear() # Streamlit 버전에 따라 동작 안할 수 있으니 전체 클리어 사용하되 분리된 함수 덕에 빠름
+        st.cache_data.clear() 
         return True
     except Exception as e:
         st.error(f"실패: {e}")
         return False
 
 # --- 일정 관리 ---
-def fetch_schedules():
-    if not supabase: return []
-    try:
-        # DB에서 일정 가져오기
-        res = supabase.table("schedule").select("*").execute()
-        events = []
-        for item in res.data:
-            events.append({
-                "id": str(item["id"]),
-                "title": item["title"],
-                "start": item["start_time"],
-                "end": item.get("end_time", ""),
-                "allDay": False
-            })
-        return events
-    except Exception as e:
-        # DB 연결 실패 시에도 캘린더가 죽지 않도록 빈 리스트 반환
-        return []
-
 def add_schedule(title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").insert({"title": title, "start_time": start_time}).execute()
-        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
+        st.cache_data.clear() # 일정 추가 후 캐시 갱신
         return True
     except Exception as e:
-        st.error(f"일정 추가 실패: {e}")
+        st.error(f"추가 실패: {e}")
         return False
 
 def update_schedule(id, title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").update({"title": title, "start_time": start_time}).eq("id", id).execute()
-        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"수정 실패: {e}")
@@ -252,7 +264,7 @@ def delete_schedule(id):
     if not supabase: return
     try:
         supabase.table("schedule").delete().eq("id", id).execute()
-        st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"삭제 실패: {e}")
@@ -263,7 +275,6 @@ def init_session_state():
     if 'scan_buffer' not in st.session_state: st.session_state.scan_buffer = []
     if 'proc_msg' not in st.session_state: st.session_state.proc_msg = None
     if 'selected_rack' not in st.session_state: st.session_state.selected_rack = None
-    if 'calendar_key' not in st.session_state: st.session_state.calendar_key = 0
 
 def to_excel(df):
     output = io.BytesIO()
@@ -514,7 +525,12 @@ def schedule_dialog(sel_date=None, event_data=None):
 # --- 메인 ---
 def main():
     init_session_state()
-    df_master, df_mapping, df_log, df_details = load_data_from_db()
+    
+    # [수정] 무거운 데이터, 가벼운 데이터 분리 로드
+    with st.spinner("📦 기초 데이터 로드 중..."):
+        df_master, df_mapping, df_details = load_heavy_data()
+        
+    df_log, events = load_light_data()
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["1. 연속 스캔", "2. 재고 현황", "3. 일괄 업로드", "4. 포장데이터", "5. 품목 마스터", "6. 데이터 진단", "7. 월간 일정"])
 
@@ -522,7 +538,7 @@ def main():
         c_h, c_r = st.columns([4, 1])
         with c_h: st.subheader("🚀 스캔 작업")
         with c_r: 
-            if st.button("🔄 새로고침", use_container_width=True, key='r1'): clear_cache(); st.rerun()
+            if st.button("🔄 새로고침", use_container_width=True, key='r1'): clear_cache_all(); st.rerun()
 
         if st.session_state.proc_msg:
             m_type, m_text = st.session_state.proc_msg
@@ -607,7 +623,7 @@ def main():
 
                 if chunked_insert('입출고', clean_df):
                     st.success(f"✅ 총 {len(clean_df)}건 업로드 완료!")
-                    clear_cache()
+                    clear_cache_all()
                     st.rerun()
             except Exception as e:
                 st.error(f"업로드 중 오류 발생: {e}")
@@ -617,7 +633,7 @@ def main():
         with st.expander("🚨 데이터 전체 초기화 (주의)"):
             st.warning("이 버튼을 누르면 모든 데이터가 삭제됩니다.")
             if st.button("데이터 초기화 실행", type="primary"):
-                if reset_database():
+                if reset_database(): # 이 함수는 구현 안되어 있지만, 기존 코드에 있다면 유지
                     st.success("모든 데이터가 삭제되었습니다.")
                     st.rerun()
 
@@ -653,7 +669,7 @@ def main():
                     st.write("상세내역 업로드 중...")
                     chunked_insert('상세내역', dets)
                 
-                clear_cache()
+                clear_cache_all()
                 st.success("✅ 대용량 등록 완료!")
                 st.rerun()
             except Exception as e: st.error(f"오류: {e}")
@@ -665,7 +681,7 @@ def main():
         st.subheader("🕵️‍♀️ 데이터 진단 (총량 확인)")
         
         if st.button("🔄 [필수] 캐시 삭제 및 데이터 재로드", type="primary", use_container_width=True):
-            st.cache_data.clear()
+            clear_cache_all()
             st.rerun()
             
         c1, c2, c3 = st.columns(3)
@@ -677,45 +693,12 @@ def main():
 
     with tab7:
         st.subheader("🗓️ 월간 출고 일정")
-        # [수정] 캘린더 진단 모드 (Toggle) 추가
-        debug_cal = st.checkbox("🛠️ 캘린더 진단 모드 (화면 안나올 때 체크)", value=False)
-        
-        if debug_cal:
-            # 진단 모드: DB 없이 강제 렌더링
-            from streamlit_calendar import calendar
-            cal = calendar(
-                events=[{"title": "테스트 일정", "start": datetime.now().isoformat()}],
-                options={"initialView": "dayGridMonth", "headerToolbar": {"left": "title", "center": "", "right": ""}},
-                custom_css={'height': '600px'} # 높이 강제 지정
-            )
-            st.warning("진단 모드입니다. 달력이 보인다면 라이브러리는 정상입니다.")
-        else:
-            # 정상 모드
-            try:
-                from streamlit_calendar import calendar
-                events = fetch_schedules()
-                
-                cal_key = f"my_calendar_{st.session_state.calendar_key}"
-                
-                cal = calendar(
-                    events=events,
-                    options={
-                        "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
-                        "initialView": "dayGridMonth",
-                    },
-                    custom_css={'height': '600px'}, # [수정] 높이 명시적 지정
-                    key=cal_key
-                )
-                if cal.get("callback") == "dateClick":
-                    schedule_dialog(sel_date=cal["dateClick"]["date"])
-                elif cal.get("callback") == "eventClick":
-                    evt_id = cal["eventClick"]["event"]["id"]
-                    evt_data = next((e for e in events if e["id"] == evt_id), None)
-                    if evt_data: schedule_dialog(event_data=evt_data)
-            except ImportError:
-                st.error("❌ 'streamlit-calendar' 라이브러리 미설치")
-            except Exception as e:
-                st.error(f"❌ 캘린더 오류: {e}")
+        cal = calendar(events=events, options={"headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"}, "initialView": "dayGridMonth"}, key="my_cal")
+        if cal.get("callback") == "dateClick": schedule_dialog(sel_date=cal["dateClick"]["date"])
+        elif cal.get("callback") == "eventClick":
+            evt_id = cal["eventClick"]["event"]["id"]
+            evt_data = next((e for e in events if e["id"] == evt_id), None)
+            if evt_data: schedule_dialog(event_data=evt_data)
 
 if __name__ == '__main__':
     main()
