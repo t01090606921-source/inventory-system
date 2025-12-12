@@ -20,7 +20,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.11.5)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.11.7)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -47,26 +47,20 @@ def init_connection():
 supabase = init_connection()
 
 # --- [대용량] 데이터 가져오기 ---
-def fetch_all_data(table_name):
+def fetch_all_data(table_name, sort_col):
     if not supabase: return []
     all_data = []
-    page_size = 1000 # 안전하게 1000개씩
+    page_size = 1000
     offset = 0
     
     while True:
         try:
-            # 순서 보장을 위해 order 추가 안함 (Supabase 기본 동작 의존, 에러 방지)
-            response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
+            response = supabase.table(table_name).select("*").order(sort_col).range(offset, offset + page_size - 1).execute()
             data = response.data
             
-            if not data:
-                break
-                
+            if not data: break
             all_data.extend(data)
-            
-            if len(data) < page_size: 
-                break
-                
+            if len(data) < page_size: break
             offset += page_size
         except Exception as e:
             print(f"Error fetching {table_name}: {e}")
@@ -79,18 +73,18 @@ def fetch_all_data(table_name):
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
-        # 진행률 표시 제거 (UI 깔끔하게)
-        data_m = fetch_all_data("품목표")
-        df_m = pd.DataFrame(data_m)
-        
-        data_map = fetch_all_data("매핑정보")
-        df_map = pd.DataFrame(data_map)
-        
-        data_l = fetch_all_data("입출고")
-        df_l = pd.DataFrame(data_l)
-        
-        data_d = fetch_all_data("상세내역") 
-        df_d = pd.DataFrame(data_d) 
+        with st.spinner("데이터 로드 중..."):
+            data_m = fetch_all_data("품목표", "품목코드")
+            df_m = pd.DataFrame(data_m)
+            
+            data_map = fetch_all_data("매핑정보", "box번호")
+            df_map = pd.DataFrame(data_map)
+            
+            data_l = fetch_all_data("입출고", "id")
+            df_l = pd.DataFrame(data_l)
+            
+            data_d = fetch_all_data("상세내역", "box번호") 
+            df_d = pd.DataFrame(data_d) 
 
         for df in [df_m, df_map, df_l, df_d]:
             if not df.empty:
@@ -111,12 +105,11 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])].copy()
     
-    if stock_boxes.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
+    if not stock_boxes.empty:
+        stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
+    else:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame() # 재고 없음
     
-    # 매핑정보 컬럼 없으면 생성 (에러 방지)
     if df_mapping.empty:
         df_mapping = pd.DataFrame(columns=['match_key', 'box번호', '품목코드', '수량'])
     else:
@@ -215,10 +208,11 @@ def insert_log(new_data_list):
         st.error(f"실패: {e}")
         return False
 
-# --- 일정 관리 (UI 갱신 로직 추가) ---
+# --- 일정 관리 ---
 def fetch_schedules():
     if not supabase: return []
     try:
+        # DB에서 일정 가져오기
         res = supabase.table("schedule").select("*").execute()
         events = []
         for item in res.data:
@@ -231,18 +225,17 @@ def fetch_schedules():
             })
         return events
     except Exception as e:
-        st.error(f"일정 로드 실패: {e}")
+        st.error(f"일정 로드 중 오류: {e} (DB 테이블이 없는지 확인하세요)")
         return []
 
 def add_schedule(title, start_time):
     if not supabase: return
     try:
         supabase.table("schedule").insert({"title": title, "start_time": start_time}).execute()
-        # [수정] 캘린더 키 업데이트 (화면 갱신용)
         st.session_state.calendar_key = st.session_state.get('calendar_key', 0) + 1
         return True
     except Exception as e:
-        st.error(f"추가 실패: {e}")
+        st.error(f"일정 추가 실패: {e}")
         return False
 
 def update_schedule(id, title, start_time):
@@ -290,7 +283,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     if not scan_val: return
 
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
-    
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
@@ -313,7 +305,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             if not matched.empty:
                 target_box_no = str(matched.iloc[0]['box번호']).strip().upper()
                 is_compressed = True
-                if not df_mapping.empty and 'box번호' in df_mapping.columns:
+                if not df_mapping.empty:
                     df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
                     map_info = df_mapping[df_mapping['temp_key'] == target_box_no]
                     if not map_info.empty:
@@ -671,7 +663,6 @@ def main():
     with tab6:
         st.subheader("🕵️‍♀️ 데이터 진단 (총량 확인)")
         
-        # [수정] 캐시 삭제 버튼 위치 이동 (Tab 6로)
         if st.button("🔄 [필수] 캐시 삭제 및 데이터 재로드", type="primary", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
@@ -689,7 +680,12 @@ def main():
             from streamlit_calendar import calendar
             events = fetch_schedules()
             
-            # [수정] 캘린더 키에 세션 상태 변수 추가하여 강제 갱신 유도
+            if not events:
+                # [수정] 이벤트가 없으면 안내 메시지를 띄우지만 캘린더는 그림
+                st.info("등록된 일정이 없습니다. 날짜를 클릭하여 추가하세요.")
+            
+            st.write(f"총 {len(events)}개의 일정 로드됨") # 디버깅용 메시지
+
             cal_key = f"my_calendar_{st.session_state.calendar_key}"
             
             cal = calendar(
@@ -698,7 +694,7 @@ def main():
                     "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
                     "initialView": "dayGridMonth",
                 },
-                key=cal_key # 키 변경 -> 리렌더링 유발
+                key=cal_key
             )
             if cal.get("callback") == "dateClick":
                 schedule_dialog(sel_date=cal["dateClick"]["date"])
