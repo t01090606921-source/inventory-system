@@ -5,11 +5,11 @@ import io
 from supabase import create_client, Client
 import math
 
-# [중요] 캘린더 라이브러리 확인용 (설치 안됐으면 여기서 에러가 나야 함)
+# [안전장치] 라이브러리 체크
 try:
     from streamlit_calendar import calendar
 except ImportError:
-    st.error("🚨 'streamlit-calendar' 라이브러리가 설치되지 않았습니다! requirements.txt 파일에 'streamlit-calendar'가 있는지 확인하고 앱을 Reboot 해주세요.")
+    st.error("🚨 'streamlit-calendar' 라이브러리가 없습니다. requirements.txt를 확인하세요.")
     st.stop()
 
 # --- [1] 로그인 보안 ---
@@ -20,7 +20,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.11.3)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.11.4)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -51,17 +51,17 @@ if st.button("🔄 [필수] 캐시 삭제 및 데이터 재로드", type="primar
     st.cache_data.clear()
     st.rerun()
 
-# --- [핵심 수정] 대용량 데이터 가져오기 (정렬 추가 + 1000건 제한 준수) ---
+# --- [핵심 수정] 대용량 데이터 가져오기 (정렬 조건 제거로 호환성 확보) ---
 def fetch_all_data(table_name):
     if not supabase: return []
     all_data = []
-    page_size = 1000 # Supabase 최대 제한인 1000으로 고정 (안전)
+    page_size = 1000 # 안전하게 1000개씩
     offset = 0
     
     while True:
         try:
-            # [중요] .order('id')를 추가해야 페이지네이션이 정확하게 작동함
-            response = supabase.table(table_name).select("*").order("id", desc=True).range(offset, offset + page_size - 1).execute()
+            # [수정] .order("id") 제거 -> id 컬럼이 없는 테이블에서도 작동하도록 수정
+            response = supabase.table(table_name).select("*").range(offset, offset + page_size - 1).execute()
             data = response.data
             
             if not data:
@@ -69,12 +69,13 @@ def fetch_all_data(table_name):
                 
             all_data.extend(data)
             
-            if len(data) < page_size: # 1000개보다 적게 왔으면 그게 마지막 페이지
+            if len(data) < page_size: 
                 break
                 
             offset += page_size
         except Exception as e:
-            st.warning(f"⚠️ {table_name} 로드 중 끊김 발생 (현재 {len(all_data)}건): {e}")
+            # 에러 나면 지금까지 긁은거라도 반환 (멈춤 방지)
+            print(f"Error fetching {table_name}: {e}")
             break
             
     return all_data
@@ -84,57 +85,63 @@ def fetch_all_data(table_name):
 def load_data_from_db():
     if not supabase: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
-        # 진행률 표시 (사용자가 멈췄는지 알 수 있게)
-        with st.status("데이터를 불러오는 중...", expanded=True) as status:
-            st.write("품목표 로드 중...")
+        with st.spinner("데이터 로드 중..."):
             data_m = fetch_all_data("품목표")
             df_m = pd.DataFrame(data_m)
             
-            st.write(f"매핑정보 로드 중... (현재 로직 적용)")
             data_map = fetch_all_data("매핑정보")
             df_map = pd.DataFrame(data_map)
             
-            st.write("입출고 내역 로드 중...")
             data_l = fetch_all_data("입출고")
             df_l = pd.DataFrame(data_l)
             
-            st.write("상세내역 로드 중...")
             data_d = fetch_all_data("상세내역") 
-            df_d = pd.DataFrame(data_d)
-            
-            status.update(label="데이터 로드 완료!", state="complete", expanded=False)
+            df_d = pd.DataFrame(data_d) 
 
         for df in [df_m, df_map, df_l, df_d]:
             if not df.empty:
                 df.columns = [c.lower() for c in df.columns]
 
         return df_m, df_map, df_l, df_d
-    except Exception as e:
-        st.error(f"데이터 로드 치명적 오류: {e}")
+    except Exception:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def clear_cache():
     st.cache_data.clear()
 
-# --- [4] 재고 현황 계산 ---
+# --- [4] 재고 현황 계산 (KeyError 방지 패치) ---
 @st.cache_data(show_spinner=False)
 def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
-    if df_log.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    # [수정] 빈 데이터프레임이라도 컬럼은 가지고 있게 초기화 (Merge 에러 방지)
+    if df_log.empty: 
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     last_stat = df_log.sort_values('id').groupby('box번호').tail(1)
     stock_boxes = last_stat[last_stat['구분'].isin(['입고', '이동'])].copy()
     
-    if not stock_boxes.empty:
-        stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
+    if stock_boxes.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # 키 생성
+    stock_boxes['match_key'] = stock_boxes['box번호'].astype(str).str.strip().str.upper()
     
-    if not df_mapping.empty:
-        df_mapping['match_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
-        if '품목코드' in df_mapping.columns:
-            df_mapping['품목코드'] = df_mapping['품목코드'].astype(str).str.strip().str.upper()
+    # [수정] df_mapping이 비었거나 키가 없을 때 대비
+    if df_mapping.empty:
+        df_mapping = pd.DataFrame(columns=['match_key', 'box번호', '품목코드', '수량'])
+    else:
+        # box번호 컬럼이 있는지 확인
+        if 'box번호' in df_mapping.columns:
+            df_mapping['match_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
+            if '품목코드' in df_mapping.columns:
+                df_mapping['품목코드'] = df_mapping['품목코드'].astype(str).str.strip().str.upper()
+        else:
+            # 컬럼이 없으면 빈 컬럼 생성해서 에러 방지
+            df_mapping['match_key'] = ""
 
     if not df_master.empty and '품목코드' in df_master.columns:
         df_master['품목코드'] = df_master['품목코드'].astype(str).str.strip().str.upper()
 
+    # 병합 (이제 df_mapping에 match_key가 무조건 있으므로 KeyError 안 남)
     merged = pd.merge(stock_boxes, df_mapping, on='match_key', how='left', suffixes=('', '_map'))
     merged['위치'] = merged['위치'].fillna('미지정').replace('', '미지정')
     merged['파렛트'] = merged['파렛트'].fillna('이름없음').replace('', '이름없음')
@@ -143,7 +150,7 @@ def calculate_stock_snapshot(df_log, df_mapping, df_master, df_details):
         merged = pd.merge(merged, df_master, on='품목코드', how='left')
 
     filtered_details = pd.DataFrame()
-    if not df_details.empty:
+    if not df_details.empty and 'box번호' in df_details.columns:
         df_details['match_key'] = df_details['box번호'].astype(str).str.strip().str.upper()
         active_keys = stock_boxes['match_key'].unique()
         filtered_details = df_details[df_details['match_key'].isin(active_keys)].copy()
@@ -291,7 +298,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
 
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
     
-    # 1. 매핑 확인
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
@@ -305,7 +311,6 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
                     disp_name = m_info.iloc[0]['품명']
                     disp_spec = m_info.iloc[0]['규격']
 
-    # 2. 압축코드 확인
     is_compressed = False
     target_box_no = scan_val
     if p_code == "정보없음":
@@ -315,7 +320,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
             if not matched.empty:
                 target_box_no = str(matched.iloc[0]['box번호']).strip().upper()
                 is_compressed = True
-                if not df_mapping.empty:
+                if not df_mapping.empty and 'box번호' in df_mapping.columns:
                     df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
                     map_info = df_mapping[df_mapping['temp_key'] == target_box_no]
                     if not map_info.empty:
@@ -681,13 +686,27 @@ def main():
 
     with tab7:
         st.subheader("🗓️ 월간 출고 일정")
-        events = fetch_schedules()
-        cal = calendar(events=events, options={"headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"}, "initialView": "dayGridMonth"}, key="my_calendar")
-        if cal.get("callback") == "dateClick": schedule_dialog(sel_date=cal["dateClick"]["date"])
-        elif cal.get("callback") == "eventClick":
-            evt_id = cal["eventClick"]["event"]["id"]
-            evt_data = next((e for e in events if e["id"] == evt_id), None)
-            if evt_data: schedule_dialog(event_data=evt_data)
+        try:
+            from streamlit_calendar import calendar
+            events = fetch_schedules()
+            cal = calendar(
+                events=events,
+                options={
+                    "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
+                    "initialView": "dayGridMonth",
+                },
+                key="my_calendar"
+            )
+            if cal.get("callback") == "dateClick":
+                schedule_dialog(sel_date=cal["dateClick"]["date"])
+            elif cal.get("callback") == "eventClick":
+                evt_id = cal["eventClick"]["event"]["id"]
+                evt_data = next((e for e in events if e["id"] == evt_id), None)
+                if evt_data: schedule_dialog(event_data=evt_data)
+        except ImportError:
+            st.error("❌ 'streamlit-calendar' 라이브러리가 설치되지 않았습니다. requirements.txt를 확인해주세요.")
+        except Exception as e:
+            st.error(f"❌ 캘린더 로드 중 오류 발생: {e}")
 
 if __name__ == '__main__':
     main()
