@@ -20,7 +20,7 @@ def check_password():
         return True
     
     st.set_page_config(page_title="재고관리(최종)", layout="wide")
-    st.title("🏭 디지타스 창고 재고관리 (Ver.11.7)")
+    st.title("🏭 디지타스 창고 재고관리 (Ver.11.8)")
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
         if pwd == "1234": 
@@ -225,7 +225,7 @@ def fetch_schedules():
             })
         return events
     except Exception as e:
-        st.error(f"일정 로드 중 오류: {e} (DB 테이블이 없는지 확인하세요)")
+        # DB 연결 실패 시에도 캘린더가 죽지 않도록 빈 리스트 반환
         return []
 
 def add_schedule(title, start_time):
@@ -283,6 +283,7 @@ def buffer_scan(df_master, df_mapping, df_log, df_details):
     if not scan_val: return
 
     disp_name, disp_spec, disp_qty, p_code = "정보없음", "규격없음", 0, ""
+    
     if not df_mapping.empty and 'box번호' in df_mapping.columns:
         df_mapping['temp_key'] = df_mapping['box번호'].astype(str).str.strip().str.upper()
         map_info = df_mapping[df_mapping['temp_key'] == scan_val]
@@ -676,36 +677,45 @@ def main():
 
     with tab7:
         st.subheader("🗓️ 월간 출고 일정")
-        try:
+        # [수정] 캘린더 진단 모드 (Toggle) 추가
+        debug_cal = st.checkbox("🛠️ 캘린더 진단 모드 (화면 안나올 때 체크)", value=False)
+        
+        if debug_cal:
+            # 진단 모드: DB 없이 강제 렌더링
             from streamlit_calendar import calendar
-            events = fetch_schedules()
-            
-            if not events:
-                # [수정] 이벤트가 없으면 안내 메시지를 띄우지만 캘린더는 그림
-                st.info("등록된 일정이 없습니다. 날짜를 클릭하여 추가하세요.")
-            
-            st.write(f"총 {len(events)}개의 일정 로드됨") # 디버깅용 메시지
-
-            cal_key = f"my_calendar_{st.session_state.calendar_key}"
-            
             cal = calendar(
-                events=events,
-                options={
-                    "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
-                    "initialView": "dayGridMonth",
-                },
-                key=cal_key
+                events=[{"title": "테스트 일정", "start": datetime.now().isoformat()}],
+                options={"initialView": "dayGridMonth", "headerToolbar": {"left": "title", "center": "", "right": ""}},
+                custom_css={'height': '600px'} # 높이 강제 지정
             )
-            if cal.get("callback") == "dateClick":
-                schedule_dialog(sel_date=cal["dateClick"]["date"])
-            elif cal.get("callback") == "eventClick":
-                evt_id = cal["eventClick"]["event"]["id"]
-                evt_data = next((e for e in events if e["id"] == evt_id), None)
-                if evt_data: schedule_dialog(event_data=evt_data)
-        except ImportError:
-            st.error("❌ 'streamlit-calendar' 라이브러리가 설치되지 않았습니다. requirements.txt를 확인해주세요.")
-        except Exception as e:
-            st.error(f"❌ 캘린더 로드 중 오류 발생: {e}")
+            st.warning("진단 모드입니다. 달력이 보인다면 라이브러리는 정상입니다.")
+        else:
+            # 정상 모드
+            try:
+                from streamlit_calendar import calendar
+                events = fetch_schedules()
+                
+                cal_key = f"my_calendar_{st.session_state.calendar_key}"
+                
+                cal = calendar(
+                    events=events,
+                    options={
+                        "headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth,timeGridWeek,timeGridDay"},
+                        "initialView": "dayGridMonth",
+                    },
+                    custom_css={'height': '600px'}, # [수정] 높이 명시적 지정
+                    key=cal_key
+                )
+                if cal.get("callback") == "dateClick":
+                    schedule_dialog(sel_date=cal["dateClick"]["date"])
+                elif cal.get("callback") == "eventClick":
+                    evt_id = cal["eventClick"]["event"]["id"]
+                    evt_data = next((e for e in events if e["id"] == evt_id), None)
+                    if evt_data: schedule_dialog(event_data=evt_data)
+            except ImportError:
+                st.error("❌ 'streamlit-calendar' 라이브러리 미설치")
+            except Exception as e:
+                st.error(f"❌ 캘린더 오류: {e}")
 
 if __name__ == '__main__':
     main()
