@@ -2,137 +2,201 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
 import io
+import time
 
-# 1. 시스템 설정 (가장 먼저 실행)
-st.set_page_config(page_title="AS TAT 시스템", layout="wide")
-
-# Supabase 연결 시도 및 에러 체크
+# --- 1. Supabase 접속 설정 ---
 try:
     url: str = st.secrets["SUPABASE_URL"]
     key: str = st.secrets["SUPABASE_KEY"]
     supabase: Client = create_client(url, key)
 except Exception as e:
-    st.error(f"❌ 접속 설정 오류: {e}")
-    st.stop()
+    st.error("⚠️ Supabase 접속 설정(Secrets)을 확인해주세요.")
 
-st.title("🚀 AS TAT 분석 시스템 (최종 점검 버전)")
+st.set_page_config(page_title="AS TAT 시스템", layout="wide")
+st.title("📊 AS TAT 통합 관리 시스템 (최종 완성본)")
 
-# --- [전수 로드 함수] ---
-def fetch_all_data(table_name, columns="*"):
-    all_data = []
-    limit = 1000
-    offset = 0
-    while True:
-        try:
-            res = supabase.table(table_name).select(columns).range(offset, offset + limit - 1).execute()
-            all_data.extend(res.data)
-            if len(res.data) < limit: break
-            offset += limit
-        except: break
-    return pd.DataFrame(all_data)
+def sanitize_code(val):
+    if pd.isna(val) or str(val).strip() == "": return ""
+    return str(val).split('.')[0].strip().upper()
 
-# --- 2. 사이드바 (마스터 등록 및 초기화) ---
+# --- 2. 사이드바 관리 ---
 with st.sidebar:
-    st.header("⚙️ 시스템 관리")
+    st.header("⚙️ 시스템 엔진 관리")
+    if st.button("🔍 현재 DB 데이터 총 개수 확인", use_container_width=True):
+        res = supabase.table("as_history").select("id", count="exact").limit(1).execute()
+        st.metric("저장된 데이터", f"{res.count if res.count else 0:,} 건")
+
+# --- 3. 메인 기능 탭 ---
+tab0, tab1, tab2, tab3 = st.tabs(["🗂️ 마스터 관리", "📥 고속 입고", "📤 출고 처리", "📈 분석 리포트"])
+
+# --- [TAB 0] 마스터 관리 (복구 완료) ---
+with tab0:
+    st.subheader("📋 마스터 기준 정보 등록")
+    st.markdown("자재번호에 따른 **공급업체** 및 **분류구분** 정보를 설정합니다.")
+    m_file = st.file_uploader("마스터 파일 (XLSX/CSV)", type=['xlsx', 'csv'], key="m_mgmt")
     
-    # 마스터 업로드 버튼 강제 노출
-    st.subheader("1. 마스터 데이터 등록")
-    master_file = st.file_uploader("마스터 엑셀 선택", type=['xlsx'], key="m_key")
-    
-    if master_file and st.button("🚀 마스터 강제 재등록"):
-        with st.spinner("데이터 동기화 중..."):
-            m_df = pd.read_excel(master_file, dtype=str)
-            t_col = next((c for c in m_df.columns if "품목코드" in str(c) or "자재번호" in str(c)), m_df.columns[0])
-            m_data = [{"자재번호": str(row[t_col]).strip().upper(), 
-                       "공급업체명": str(row.iloc[5]).strip() if len(row)>5 else "정보누락",
-                       "분류구분": str(row.iloc[10]).strip() if len(row)>10 else "정보누락"} 
-                      for _, row in m_df.iterrows() if not pd.isna(row[t_col])]
-            if m_data:
-                supabase.table("master_data").delete().neq("자재번호", "EMPTY").execute()
-                for i in range(0, len(m_data), 200):
-                    supabase.table("master_data").insert(m_data[i:i+200]).execute()
-                st.success("✅ 등록 완료!")
+    if m_file and st.button("🔄 마스터 데이터 로드", use_container_width=True):
+        try:
+            # 파일 형식에 따른 로드
+            if m_file.name.endswith('.csv'):
+                m_df = pd.read_csv(m_file, encoding='cp949').fillna("")
+            else:
+                m_df = pd.read_excel(m_file).fillna("")
+            
+            # 자재번호를 Key로 하는 딕셔너리 생성
+            st.session_state.master_lookup = {sanitize_code(row.iloc[0]): {
+                "업체": str(row.iloc[5]).strip() if len(row) > 5 else "미등록",
+                "분류": str(row.iloc[10]).strip() if len(row) > 10 else "수리대상"
+            } for _, row in m_df.iterrows() if not pd.isna(row.iloc[0])}
+            
+            st.success(f"✅ 마스터 데이터 {len(st.session_state.master_lookup):,}건 로드 완료!")
+        except Exception as e:
+            st.error(f"마스터 로드 중 오류 발생: {e}")
+
+# --- [TAB 1] 입고 처리 (진행 사항 표시) ---
+with tab1:
+    i_file = st.file_uploader("AS 입고 CSV 파일 업로드", type=['csv'], key="i_up")
+    if i_file and st.button("🚀 입고 프로세스 시작", use_container_width=True):
+        if "master_lookup" not in st.session_state:
+            st.error("⚠️ 먼저 [마스터 관리] 탭에서 마스터 파일을 업로드해주세요.")
+        else:
+            ui_msg, ui_prog = st.empty(), st.progress(0)
+            try:
+                # 1단계: DB 중복 체크 데이터 로드
+                existing_combos = set()
+                offset, batch_size = 0, 4000
+                count_res = supabase.table("as_history").select("id", count="exact").limit(1).execute()
+                total_db = count_res.count if count_res.count else 1
+                
+                while True:
+                    res = supabase.table("as_history").select("입고일, 압축코드").range(offset, offset + batch_size - 1).execute()
+                    if not res.data: break
+                    for r in res.data:
+                        existing_combos.add(f"{pd.to_datetime(r['입고일']).strftime('%Y-%m-%d')}|{str(r['압축코드']).strip().upper()}")
+                    offset += len(res.data)
+                    ui_msg.info(f"🔍 [1/2] 중복 확인용 DB 로드 중... ({offset:,} / {total_db:,})")
+                    ui_prog.progress(min(offset / total_db, 1.0))
+                    if len(res.data) < batch_size: break
+
+                # 2단계: 파일 분석 및 저장
+                for enc in ['utf-8-sig', 'cp949', 'utf-8']:
+                    try: i_file.seek(0); i_df = pd.read_csv(i_file, encoding=enc).fillna(""); break
+                    except: continue
+
+                combined = i_df.astype(str).apply(lambda x: "".join(x), axis=1)
+                as_in = i_df[combined.str.replace(" ", "").str.contains("A/S철거|AS철거", na=False)].copy()
+                recs, dup_cnt, total_in = [], 0, len(as_in)
+
+                for i, (_, row) in enumerate(as_in.iterrows()):
+                    in_date = pd.to_datetime(row.iloc[1]).strftime('%Y-%m-%d')
+                    code = str(row.iloc[7]).strip().upper()
+                    if f"{in_date}|{code}" in existing_combos:
+                        dup_cnt += 1; continue
+                    
+                    m_info = st.session_state.master_lookup.get(sanitize_code(row.iloc[3]), {})
+                    recs.append({
+                        "압축코드": code, "자재번호": sanitize_code(row.iloc[3]), "자재명": str(row.iloc[4]).strip(),
+                        "규격": str(row.iloc[5]).strip(), "공급업체명": m_info.get("업체", "미등록"),
+                        "분류구분": m_info.get("분류", "수리대상"), "입고일": in_date, "상태": "출고 대기"
+                    })
+                    if len(recs) >= 200:
+                        supabase.table("as_history").insert(recs).execute()
+                        recs = []
+                        ui_msg.warning(f"🚀 [2/2] 신규 데이터 저장 중... ({i+1:,} / {total_in:,})")
+                        ui_prog.progress(min((i+1)/total_in, 1.0))
+                
+                if recs: supabase.table("as_history").insert(recs).execute()
+                ui_msg.success(f"✅ 입고 완료! (신규: {total_in-dup_cnt:,} / 중복제외: {dup_cnt:,})")
+                ui_prog.progress(1.0)
+            except Exception as e: st.error(f"오류: {e}")
+
+# --- [TAB 2] 출고 처리 (진행 사항 표시) ---
+with tab2:
+    out_file = st.file_uploader("출고 결과 엑셀 업로드", type=['xlsx'], key="out_up")
+    if out_file and st.button("🚀 출고 검증 및 반영 시작", use_container_width=True):
+        ui_msg, ui_prog = st.empty(), st.progress(0)
+        try:
+            df_out = pd.read_excel(out_file).fillna("")
+            as_out = df_out[df_out.iloc[:, 3].astype(str).str.contains('AS 카톤 박스', na=False)].copy()
+            
+            ui_msg.info("🔍 [1/4] DB 데이터를 불러오는 중...")
+            db_res = supabase.table("as_history").select("id, 압축코드, 입고일, 출고일, 상태").execute()
+            db_raw = db_res.data
+            
+            ui_msg.info("⚙️ [2/4] 고속 대조 엔진 빌드 중...")
+            db_lookup = {}
+            for r in db_raw:
+                c = str(r['압축코드']).strip().upper()
+                if c not in db_lookup: db_lookup[c] = []
+                db_lookup[c].append(r)
+            
+            update_list, total_out = [], len(as_out)
+            for i, (_, row) in enumerate(as_out.iterrows()):
+                code = str(row.iloc[10]).strip().upper()
+                ex_out_date = pd.to_datetime(row.iloc[6]).strftime('%Y-%m-%d')
+                for db_row in db_lookup.get(code, []):
+                    if str(db_row['입고일']) <= ex_out_date:
+                        if db_row['상태'] == "출고 완료" and str(db_row['출고일']) == ex_out_date: continue
+                        update_list.append({"id": db_row['id'], "출고일": ex_out_date})
+                if i % 100 == 0:
+                    ui_msg.info(f"🧪 [3/4] 유효성 검증 중... ({i+1:,} / {total_out:,})")
+                    ui_prog.progress(min((i+1)/total_out, 1.0))
+
+            if update_list:
+                for idx, item in enumerate(update_list):
+                    supabase.table("as_history").update({"출고일": item['출고일'], "상태": "출고 완료"}).eq("id", item['id']).execute()
+                    if idx % 50 == 0:
+                        ui_msg.warning(f"🔄 [4/4] DB 업데이트 중... ({idx:,} / {len(update_list):,})")
+                        ui_prog.progress(min(idx/len(update_list), 1.0))
+                ui_msg.success(f"✅ 반영 완료: {len(update_list):,}건")
+                ui_prog.progress(1.0)
+        except Exception as e: st.error(f"오류: {e}")
+
+# --- [TAB 3] 분석 리포트 (진행 사항 표시) ---
+with tab3:
+    if st.button("📊 리포트 생성 (전량 추출)", use_container_width=True):
+        ui_msg, ui_prog = st.empty(), st.progress(0)
+        try:
+            all_data, offset = [], 0
+            count_res = supabase.table("as_history").select("id", count="exact").limit(1).execute()
+            total_db = count_res.count if count_res.count else 1
+            
+            while True:
+                res = supabase.table("as_history").select("*").range(offset, offset + 999).execute()
+                if not res.data: break
+                all_data.extend(res.data)
+                offset += len(res.data)
+                ui_msg.info(f"📥 DB 수집 중... ({offset:,} / {total_db:,})")
+                ui_prog.progress(min(offset/total_db, 1.0))
+                if len(res.data) < 1000: break
+            
+            if all_data:
+                df = pd.DataFrame(all_data)
+                df['입고일'] = pd.to_datetime(df['입고일'], errors='coerce')
+                df['출고일'] = pd.to_datetime(df['출고일'], errors='coerce')
+                df['tat'] = (df['출고일'] - df['입고일']).dt.days
+                
+                cols = ['입고일', '자재번호', '자재명', '규격', '공급업체명', '분류구분', '압축코드', '출고일', 'tat']
+                existing = [c for c in cols if c in df.columns]
+
+                def make_bin(target_df):
+                    out = io.BytesIO()
+                    with pd.ExcelWriter(out, engine='xlsxwriter') as wr:
+                        if target_df.empty: pd.DataFrame(columns=existing).to_excel(wr, index=False)
+                        else: target_df[existing].to_excel(wr, index=False)
+                    return out.getvalue()
+
+                st.session_state.bin_tat = make_bin(df[df['출고일'].notna()])
+                st.session_state.bin_stay = make_bin(df[df['출고일'].isna()])
+                st.session_state.bin_total = make_bin(df)
+                st.session_state.data_ready = True
+                ui_msg.success("✅ 리포트 생성 완료!")
                 st.rerun()
+        except Exception as e: st.error(f"리포트 오류: {e}")
 
-    # 초기화 버튼
-    st.divider()
-    if st.button("⚠️ 데이터 전체 초기화", type="primary"):
-        supabase.table("as_history").delete().neq("id", -1).execute()
-        st.rerun()
-
-# --- 3. 메인 기능 (입고 / 출고) ---
-st.header("📥 AS 입고 / 📤 AS 출고")
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("입고 처리")
-    in_file = st.file_uploader("입고 엑셀", type=['xlsx'], key="in_key")
-    if in_file and st.button("🚀 입고 실행"):
-        m_df_local = fetch_all_data("master_data")
-        m_lookup = m_df_local.set_index('자재번호').to_dict('index') if not m_df_local.empty else {}
-        
-        df = pd.read_excel(in_file, dtype=str)
-        as_in = df[df.iloc[:, 0].str.contains('A/S 철거', na=False)].copy()
-        
-        recs = []
-        for i, (_, row) in enumerate(as_in.iterrows()):
-            mat_val = str(row.iloc[3]).strip().upper()
-            m_info = m_lookup.get(mat_val)
-            recs.append({
-                "압축코드": str(row.iloc[7]).strip(), "자재번호": mat_val,
-                "규격": str(row.iloc[5]).strip(), "상태": "출고 대기",
-                "공급업체명": m_info['공급업체명'] if m_info else "미등록",
-                "분류구분": m_info['분류구분'] if m_info else "미등록",
-                "입고일": pd.to_datetime(row.iloc[1]).strftime('%Y-%m-%d')
-            })
-            if len(recs) == 1000:
-                supabase.table("as_history").insert(recs).execute()
-                recs = []
-        if recs: supabase.table("as_history").insert(recs).execute()
-        st.success("✅ 입고 완료")
-
-with col2:
-    st.subheader("출고 처리")
-    out_file = st.file_uploader("출고 엑셀", type=['xlsx'], key="out_key")
-    if out_file and st.button("🚀 출고 실행"):
-        df_out = pd.read_excel(out_file, dtype=str)
-        as_out = df_out[df_out.iloc[:, 3].str.contains('AS 카톤 박스', na=False)].copy()
-        if not as_out.empty:
-            out_keys = [str(r).strip() for r in as_out.iloc[:, 10]]
-            out_date = pd.to_datetime(as_out.iloc[0, 6]).strftime('%Y-%m-%d')
-            for i in range(0, len(out_keys), 500):
-                supabase.table("as_history").update({"출고일": out_date, "상태": "출고 완료"}).in_("압축코드", out_keys[i:i+500]).eq("상태", "출고 대기").execute()
-            st.success("✅ 출고 완료")
-
-# --- 4. TAT 통계 분석 (경량 리포트) ---
-st.divider()
-st.header("📊 수리대상 TAT 분석 리포트")
-
-if st.button("📈 통계 분석 실행 (데이터 전수 로드)", use_container_width=True):
-    with st.spinner("57만 건 데이터 분석 중..."):
-        df_raw = fetch_all_data("as_history", "입고일, 출고일, 공급업체명, 분류구분")
-    
-    if not df_raw.empty:
-        df_raw['입고일'] = pd.to_datetime(df_raw['입고일'], errors='coerce')
-        df_raw['출고일'] = pd.to_datetime(df_raw['출고일'], errors='coerce')
-        
-        # 수리대상 필터링 및 TAT 계산
-        df_rep = df_raw[df_raw['분류구분'] == '수리대상'].copy()
-        df_rep['TAT'] = (df_rep['출고일'] - df_rep['입고일']).dt.days
-        
-        m1, m2 = st.columns(2)
-        m1.metric("전체 수리대상 건수", f"{len(df_rep):,} 건")
-        m2.metric("평균 TAT (완료건 기준)", f"{df_rep['TAT'].mean():.1f} 일")
-
-        # 업체별 요약
-        summary = df_rep[df_rep['출고일'].notna()].groupby('공급업체명').agg(
-            완료건수=('TAT', 'count'), 평균TAT=('TAT', 'mean')
-        ).reset_index()
-        summary['평균TAT'] = summary['평균TAT'].round(1)
-        st.table(summary.sort_values('평균TAT'))
-        
-        # 상세 결과 다운로드
-        csv = df_rep.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 수리대상 데이터 다운로드", csv, "TAT_Report.csv", "text/csv")
-    else:
-        st.info("조회할 데이터가 없습니다.")
+    if st.session_state.get("data_ready"):
+        st.divider()
+        c1, c2, c3 = st.columns(3)
+        with c1: st.download_button("📥 출고완료", st.session_state.bin_tat, "1_done.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        with c2: st.download_button("📥 미출고", st.session_state.bin_stay, "2_pending.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        with c3: st.download_button("📥 전체합계", st.session_state.bin_total, "3_all.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
