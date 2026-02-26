@@ -13,7 +13,7 @@ except Exception as e:
     st.error("⚠️ Supabase 접속 설정(Secrets)을 확인해주세요.")
 
 st.set_page_config(page_title="AS TAT 시스템", layout="wide")
-st.title("📊 AS TAT 통합 관리 시스템 (최종 검토본)")
+st.title("📊 AS TAT 통합 관리 시스템 (UI 전면 복구)")
 
 def sanitize_code(val):
     if pd.isna(val) or str(val).strip() == "": return ""
@@ -29,58 +29,59 @@ with st.sidebar:
 # --- 3. 메인 기능 탭 ---
 tab0, tab1, tab2, tab3 = st.tabs(["🗂️ 마스터 관리", "📥 고속 입고", "📤 출고 처리", "📈 분석 리포트"])
 
-# --- [TAB 0] 마스터 관리 (이 부분이 복구되었습니다!) ---
+# --- [TAB 0] 마스터 관리 (이 부분에 업로드 박스가 나타납니다) ---
 with tab0:
     st.subheader("📋 마스터 기준 정보 등록")
-    st.markdown("자재번호별 **공급업체** 및 **분류구분** 정보를 시스템 메모리에 로드합니다.")
+    st.markdown("자재번호에 따른 업체명과 분류 정보를 로드합니다.")
     
-    # [중요] 파일 업로더 코드
-    m_file = st.file_uploader("마스터 엑셀(XLSX) 또는 CSV 파일을 선택하세요", type=['xlsx', 'csv'], key="master_upload_key")
+    # 드롭다운 업로드 박스 강제 출력
+    m_file = st.file_uploader(
+        "마스터 엑셀(XLSX) 또는 CSV 파일을 드래그해서 놓으세요.", 
+        type=['xlsx', 'csv'], 
+        key="master_file_uploader"
+    )
     
     if m_file:
-        if st.button("🔄 마스터 데이터 시스템에 로드", use_container_width=True):
+        if st.button("🔄 마스터 데이터 로드", use_container_width=True):
             try:
-                # 파일 확장자에 따른 읽기 방식
                 if m_file.name.endswith('.csv'):
                     m_df = pd.read_csv(m_file, encoding='cp949').fillna("")
                 else:
                     m_df = pd.read_excel(m_file).fillna("")
                 
-                # 딕셔너리 생성 (0번: 자재번호, 5번: 업체명, 10번: 분류)
+                # 0: 자재번호, 5: 공급업체명, 10: 분류구분
                 st.session_state.master_lookup = {sanitize_code(row.iloc[0]): {
                     "업체": str(row.iloc[5]).strip() if len(row) > 5 else "미등록",
                     "분류": str(row.iloc[10]).strip() if len(row) > 10 else "수리대상"
                 } for _, row in m_df.iterrows() if not pd.isna(row.iloc[0])}
                 
-                st.success(f"✅ 마스터 데이터 {len(st.session_state.master_lookup):,}건 로드 완료! 이제 입고 탭을 이용하실 수 있습니다.")
+                st.success(f"✅ 마스터 데이터 {len(st.session_state.master_lookup):,}건 로드 성공!")
             except Exception as e:
-                st.error(f"마스터 로드 중 오류 발생: {e}")
+                st.error(f"오류 발생: {e}")
 
-# --- [TAB 1] 입고 처리 (진행사항 표시) ---
+# --- [TAB 1] 입고 처리 (진행 사항 표시) ---
 with tab1:
-    i_file = st.file_uploader("AS 입고 CSV 파일 업로드", type=['csv'], key="i_up")
-    if i_file and st.button("🚀 입고 프로세스 시작", use_container_width=True):
+    st.subheader("📥 AS 입고 데이터 처리")
+    i_file = st.file_uploader("AS 입고 CSV 파일을 업로드하세요.", type=['csv'], key="i_up")
+    if i_file and st.button("🚀 입고 시작", use_container_width=True):
         if "master_lookup" not in st.session_state:
-            st.error("⚠️ [마스터 관리] 탭에서 마스터 정보를 먼저 로드해주세요.")
+            st.error("⚠️ [마스터 관리] 탭에서 마스터 파일을 먼저 로드하세요.")
         else:
             ui_msg, ui_prog = st.empty(), st.progress(0)
             try:
-                # 1. DB 대조군 로드
+                # 1. DB 대조군 로드 (진행 사항 표시)
                 existing_combos = set()
                 offset, batch_size = 0, 4000
-                count_res = supabase.table("as_history").select("id", count="exact").limit(1).execute()
-                total_db = count_res.count if count_res.count else 1
                 while True:
                     res = supabase.table("as_history").select("입고일, 압축코드").range(offset, offset + batch_size - 1).execute()
                     if not res.data: break
                     for r in res.data:
                         existing_combos.add(f"{pd.to_datetime(r['입고일']).strftime('%Y-%m-%d')}|{str(r['압축코드']).strip().upper()}")
                     offset += len(res.data)
-                    ui_msg.info(f"🔍 [1/2] 중복 확인 데이터 로드 중... ({offset:,} / {total_db:,})")
-                    ui_prog.progress(min(offset / total_db, 1.0))
+                    ui_msg.info(f"🔍 기존 데이터 대조 중... ({offset:,} 건)")
                     if len(res.data) < batch_size: break
 
-                # 2. 파일 분석 및 저장
+                # 2. 파일 분석 및 저장 (진행 사항 표시)
                 for enc in ['utf-8-sig', 'cp949', 'utf-8']:
                     try: i_file.seek(0); i_df = pd.read_csv(i_file, encoding=enc).fillna(""); break
                     except: continue
@@ -104,27 +105,27 @@ with tab1:
                     if len(recs) >= 200:
                         supabase.table("as_history").insert(recs).execute()
                         recs = []
-                        ui_msg.warning(f"🚀 [2/2] 신규 데이터 저장 중... ({i+1:,} / {total_in:,})")
+                        ui_msg.warning(f"🚀 신규 데이터 저장 중... ({i+1:,} / {total_in:,})")
                         ui_prog.progress(min((i+1)/total_in, 1.0))
-                
                 if recs: supabase.table("as_history").insert(recs).execute()
-                ui_msg.success(f"✅ 입고 완료 (신규: {total_in-dup_cnt:,} / 중복제외: {dup_cnt:,})")
+                ui_msg.success(f"✅ 완료! (신규: {total_in-dup_cnt:,} / 중복제외: {dup_cnt:,})")
                 ui_prog.progress(1.0)
             except Exception as e: st.error(f"오류: {e}")
 
-# --- [TAB 2] 출고 처리 (진행사항 표시) ---
+# --- [TAB 2] 출고 처리 (진행 사항 표시) ---
 with tab2:
-    out_file = st.file_uploader("출고 결과 엑셀 업로드", type=['xlsx'], key="out_up")
-    if out_file and st.button("🚀 출고 검증 및 반영 시작", use_container_width=True):
+    st.subheader("📤 AS 출고 데이터 처리")
+    out_file = st.file_uploader("출고 결과 엑셀(XLSX)을 업로드하세요.", type=['xlsx'], key="out_up")
+    if out_file and st.button("🚀 출고 반영", use_container_width=True):
         ui_msg, ui_prog = st.empty(), st.progress(0)
         try:
             df_out = pd.read_excel(out_file).fillna("")
             as_out = df_out[df_out.iloc[:, 3].astype(str).str.contains('AS 카톤 박스', na=False)].copy()
             
-            ui_msg.info("🔍 [1/4] DB 데이터를 불러오는 중...")
+            ui_msg.info("🔍 DB 데이터 로드 중...")
             db_res = supabase.table("as_history").select("id, 압축코드, 입고일, 출고일, 상태").execute()
             
-            ui_msg.info("⚙️ [2/4] 고속 대조 엔진 빌드 중...")
+            ui_msg.info("⚙️ 대조 엔진 빌드 중...")
             db_lookup = {}
             for r in db_res.data:
                 c = str(r['압축코드']).strip().upper()
@@ -140,34 +141,32 @@ with tab2:
                         if db_row['상태'] == "출고 완료" and str(db_row['출고일']) == ex_out_date: continue
                         update_list.append({"id": db_row['id'], "출고일": ex_out_date})
                 if i % 100 == 0:
-                    ui_msg.info(f"🧪 [3/4] 유효성 검증 진행 중... ({i+1:,} / {total_out:,})")
+                    ui_msg.info(f"🧪 유효성 검증 중... ({i+1:,} / {total_out:,})")
                     ui_prog.progress(min((i+1)/total_out, 1.0))
 
             if update_list:
                 for idx, item in enumerate(update_list):
                     supabase.table("as_history").update({"출고일": item['출고일'], "상태": "출고 완료"}).eq("id", item['id']).execute()
                     if idx % 50 == 0:
-                        ui_msg.warning(f"🔄 [4/4] DB 출고 반영 중... ({idx:,} / {len(update_list):,})")
+                        ui_msg.warning(f"🔄 DB 반영 중... ({idx:,} / {len(update_list):,})")
                         ui_prog.progress(min(idx/len(update_list), 1.0))
                 ui_msg.success(f"✅ 반영 완료: {len(update_list):,}건")
                 ui_prog.progress(1.0)
         except Exception as e: st.error(f"오류: {e}")
 
-# --- [TAB 3] 분석 리포트 (진행사항 표시) ---
+# --- [TAB 3] 분석 리포트 (진행 사항 표시) ---
 with tab3:
-    if st.button("📊 리포트 생성 (전량 추출)", use_container_width=True):
+    st.subheader("📈 데이터 리포트 다운로드")
+    if st.button("📊 리포트 생성 시작", use_container_width=True):
         ui_msg, ui_prog = st.empty(), st.progress(0)
         try:
             all_data, offset = [], 0
-            count_res = supabase.table("as_history").select("id", count="exact").limit(1).execute()
-            total_db = count_res.count if count_res.count else 1
             while True:
                 res = supabase.table("as_history").select("*").range(offset, offset + 999).execute()
                 if not res.data: break
                 all_data.extend(res.data)
                 offset += len(res.data)
-                ui_msg.info(f"📥 DB 데이터 수집 중... ({offset:,} / {total_db:,})")
-                ui_prog.progress(min(offset / total_db, 1.0))
+                ui_msg.info(f"📥 데이터 수집 중... ({offset:,} 건)")
                 if len(res.data) < 1000: break
             
             if all_data:
@@ -190,7 +189,7 @@ with tab3:
                 st.session_state.bin_stay = make_bin(df[df['출고일'].isna()])
                 st.session_state.bin_total = make_bin(df)
                 st.session_state.data_ready = True
-                ui_msg.success("✅ 리포트 파일 생성 완료!")
+                ui_msg.success("✅ 리포트 생성 완료!")
                 st.rerun()
         except Exception as e: st.error(f"오류: {e}")
 
